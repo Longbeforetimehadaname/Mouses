@@ -73,3 +73,7 @@ This branch is the shell. It calls `splitMp3` from `src/pipeline/split.ts` and r
 Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` is declared for the pipeline branch; this shell does not import it.
 
 Dependencies the other branches should not need to add: `react`, `react-dom`, `vite`, `typescript`, `vite-plugin-pwa`, `idb`, `onnxruntime-web`, plus `@vitejs/plugin-react`, `@types/react`, and `@types/react-dom`.
+
+## Earlier phone UI
+
+`web/` is an earlier phone UI already on this branch, with its own `package.json`. GitHub Actions in `.github/workflows/pages.yml` builds that folder for GitHub Pages. The shell the pipeline and player branches plug into is the app at the repository root.
