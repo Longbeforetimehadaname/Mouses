@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+*.local
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Untracked stand-ins created by scripts/with-stubs.mjs so this branch
+# builds before the pipeline and player branches are merged.
+# Once those files are tracked, Git keeps them.
+src/pipeline/split.ts
+src/player/Player.tsx
