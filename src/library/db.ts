@@ -101,7 +101,7 @@ export async function saveSplitSong(input: {
   result: SplitResult;
 }): Promise<SongMeta> {
   const now = Date.now();
-  const id = crypto.randomUUID();
+  const id = songId();
   const meta: SongMeta = {
     id,
     title: input.title,
@@ -138,4 +138,21 @@ export async function loadPlayable(
       chords: row.meta.chords,
     },
   };
+}
+
+// LAN dev (http://192.168.x.x) is not a secure context, so randomUUID is missing.
+function songId(): string {
+  const api = globalThis.crypto;
+  if (api && typeof api.randomUUID === "function") return api.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (api && typeof api.getRandomValues === "function") api.getRandomValues(bytes);
+  else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex: string[] = [];
+  for (let i = 0; i < bytes.length; i++) hex.push((bytes[i] ?? 0).toString(16).padStart(2, "0"));
+  const id = hex.join("");
+  return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
 }

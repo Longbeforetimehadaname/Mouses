@@ -14,8 +14,20 @@ interface AsrOutput {
   chunks?: AsrChunk[];
 }
 
+interface TranscribeOptions {
+  return_timestamps: "word";
+  chunk_length_s: number;
+  stride_length_s: number;
+  num_beams: number;
+  task: "transcribe";
+  condition_on_prev_tokens: false;
+  compression_ratio_threshold: number;
+  no_speech_threshold: number;
+  temperature: number;
+}
+
 interface Transcriber {
-  (audio: Float32Array, options: { return_timestamps: "word" }): Promise<AsrOutput | AsrOutput[]>;
+  (audio: Float32Array, options: TranscribeOptions): Promise<AsrOutput | AsrOutput[]>;
   dispose?: () => Promise<void>;
 }
 
@@ -31,7 +43,8 @@ export async function transcribeVocals(
     return [];
   }
 
-  // Loaded only after the Demucs worker has been terminated.
+  // Loaded only after the separation worker has been terminated, so the two
+  // WASM heaps are not live together on a phone.
   // @ts-ignore The shell adds this package; see src/pipeline/deps-requested.txt.
   const imported = await import("@huggingface/transformers");
   const transformers = imported as {
@@ -40,6 +53,8 @@ export async function transcribeVocals(
       task: "automatic-speech-recognition",
       model: string,
       options?: {
+        device?: "wasm";
+        dtype?: "q8";
         progress_callback?: (info: { status?: string; progress?: number }) => void;
       },
     ) => Promise<Transcriber>;
@@ -48,19 +63,22 @@ export async function transcribeVocals(
   onProgress?.(0.05);
   let transcriber: Transcriber | null = await transformers.pipeline(
     "automatic-speech-recognition",
-    "Xenova/whisper-tiny",
+    "Xenova/whisper-base",
     {
+      // q8 stays inside the phone budget. Base hears sung words that tiny invents.
+      device: "wasm",
+      dtype: "q8",
       progress_callback: (info) => {
         if (!onProgress || info.status !== "progress" || typeof info.progress !== "number") return;
-        onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.75);
+        onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.35);
       },
     },
   );
   try {
-    onProgress?.(0.85);
-    const output = await transcriber(mono, { return_timestamps: "word" });
-    const first = Array.isArray(output) ? output[0] : output;
-    const words = chunksToLyricWords(first?.chunks ?? []);
+    onProgress?.(0.45);
+    const words = await transcribeChunks(transcriber, peakNormalize(mono), (fraction) => {
+      onProgress?.(0.45 + fraction * 0.55);
+    });
     onProgress?.(1);
     return words;
   } finally {
@@ -74,6 +92,62 @@ export async function transcribeVocals(
       }
     }
   }
+}
+
+async function transcribeChunks(
+  transcriber: Transcriber,
+  mono: Float32Array,
+  onProgress: (fraction: number) => void,
+): Promise<LyricWord[]> {
+  onProgress(0.05);
+  const output = await transcriber(mono, {
+    return_timestamps: "word",
+    chunk_length_s: 30,
+    stride_length_s: 2,
+    num_beams: 1,
+    task: "transcribe",
+    condition_on_prev_tokens: false,
+    compression_ratio_threshold: 2.4,
+    no_speech_threshold: 0.6,
+    temperature: 0,
+  });
+  onProgress(0.9);
+  const first = Array.isArray(output) ? output[0] : output;
+  const words = chunksToLyricWords(first?.chunks ?? []);
+  const kept: LyricWord[] = [];
+  for (const word of words) {
+    // Drop a word that does not sit on the vocal. That is a guess, not singing.
+    if (regionRms(mono, word.start, word.end) < 0.015) continue;
+    kept.push(word);
+  }
+  onProgress(1);
+  return kept;
+}
+
+function regionRms(mono: Float32Array, startSec: number, endSec: number): number {
+  const start = Math.max(0, Math.floor(startSec * WHISPER_RATE));
+  const end = Math.min(mono.length, Math.max(start + 1, Math.ceil(endSec * WHISPER_RATE)));
+  let energy = 0;
+  let count = 0;
+  for (let i = start; i < end; i += 4) {
+    const sample = mono[i] ?? 0;
+    energy += sample * sample;
+    count += 1;
+  }
+  return Math.sqrt(energy / Math.max(1, count));
+}
+
+function peakNormalize(mono: Float32Array): Float32Array {
+  let peak = 0;
+  for (let i = 0; i < mono.length; i++) {
+    const value = Math.abs(mono[i] ?? 0);
+    if (value > peak) peak = value;
+  }
+  if (peak < 1e-4 || (peak > 0.85 && peak < 1.05)) return mono;
+  const gain = 0.9 / peak;
+  const scaled = new Float32Array(mono.length);
+  for (let i = 0; i < mono.length; i++) scaled[i] = (mono[i] ?? 0) * gain;
+  return scaled;
 }
 
 export function chunksToLyricWords(chunks: readonly AsrChunk[]): LyricWord[] {

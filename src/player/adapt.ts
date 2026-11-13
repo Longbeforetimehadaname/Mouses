@@ -1,7 +1,7 @@
 import type { ChordBeat, LyricWord } from "../../web/src/types";
 
 export type TimedWord = { timeSec: number; word: string };
-export type ChordChange = { beat: number; name: string };
+export type ChordChange = { beat: number; name: string; timeSec?: number };
 
 /** Map shell words onto the lyric view, which centers the active word. */
 export function lyricWords(lyrics: readonly TimedWord[]): LyricWord[] {
@@ -31,7 +31,8 @@ export function chordBeats(
 ): ChordBeat[] {
   const tempo = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
   const beatDur = 60 / tempo;
-  const durationBeats = durationSec > 0 ? Math.ceil((durationSec * tempo) / 60) : 0;
+  const origin = gridOrigin(changes, beatDur);
+  const durationBeats = durationSec > origin ? Math.ceil((durationSec - origin) / beatDur) : 0;
   const names = new Map<number, string>();
   let lastChange = 0;
   const sorted = changes
@@ -51,8 +52,17 @@ export function chordBeats(
       bar: Math.floor(index / 4),
       beat: index % 4,
       chord: names.get(index) ?? null,
-      time: index * beatDur,
+      time: origin + index * beatDur,
     });
   }
   return beats;
+}
+
+function gridOrigin(changes: readonly ChordChange[], beatDur: number): number {
+  for (const change of changes) {
+    if (typeof change.timeSec !== "number" || !Number.isFinite(change.timeSec)) continue;
+    const origin = change.timeSec - change.beat * beatDur;
+    if (Number.isFinite(origin)) return origin;
+  }
+  return 0;
 }

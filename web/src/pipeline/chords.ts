@@ -10,6 +10,8 @@ const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
 
 interface Template {
   name: string;
+  root: number;
+  seventh: boolean;
   bins: Float32Array;
 }
 
@@ -19,31 +21,93 @@ export function detectChords(
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,
+  bassLeft?: Float32Array,
+  bassRight?: Float32Array,
+  harmonyLeft?: Float32Array,
+  harmonyRight?: Float32Array,
 ): { bpm: number; beats: ChordBeat[] } {
   const mono = mixMono(left, right);
   if (mono.length === 0 || sampleRate <= 0) return { bpm: 120, beats: [] };
+  const harmony = harmonyLeft ? mixMono(harmonyLeft, harmonyRight ?? harmonyLeft) : mono;
 
   const flux = energyFlux(mono);
   const bpm = estimateBpm(flux, sampleRate);
   const duration = mono.length / sampleRate;
-  const onset = firstStrongOnset(flux, sampleRate);
   const spacing = 60 / bpm;
+  const downbeat = downbeatTime(flux, sampleRate, bpm, duration);
+  const bass = bassLeft ? mixMono(bassLeft, bassRight ?? bassLeft) : null;
   const beats: ChordBeat[] = [];
   let previous: string | null = null;
-  for (let index = 0, time = onset; time < duration - 1e-4; index++, time += spacing) {
+  let previousScore = 0;
+  let pending: string | null = null;
+  let pendingScore = 0;
+  for (let index = 0, time = downbeat; time < duration - 1e-4; index++, time += spacing) {
     const next = Math.min(duration, time + spacing);
     let regionStart = time;
     if (next - regionStart < spacing * 0.5) regionStart = Math.max(0, next - spacing);
-    const name = chordName(mono, sampleRate, regionStart, next);
+    const named = chordAt(harmony, bass, sampleRate, regionStart, next, previous, previousScore);
+    const candidate = named.name;
+    let shown: string | null = null;
+    if (!candidate || candidate === previous) {
+      pending = null;
+    } else if (pending === candidate) {
+      // The same new name won twice. Put it on the beat where it started.
+      const prior = beats[beats.length - 1];
+      if (prior && prior.chord === null) prior.chord = candidate;
+      shown = null;
+      previous = candidate;
+      previousScore = pendingScore;
+      pending = null;
+    } else {
+      pending = candidate;
+      pendingScore = named.score;
+    }
     beats.push({
       bar: Math.floor(index / 4),
       beat: index % 4,
-      chord: previous === name ? null : name,
+      chord: shown,
       time,
     });
-    previous = name;
   }
   return { bpm, beats };
+}
+
+/** Phase of a 4/4 grid. Beat 1 is the offset that lands on the strong accents. */
+function downbeatTime(flux: Float32Array, sampleRate: number, bpm: number, duration: number): number {
+  const frameRate = sampleRate / HOP;
+  const period = 60 / bpm;
+  if (flux.length === 0 || period <= 0) return 0;
+  const steps = 48;
+  let bestPhase = 0;
+  let best = -Infinity;
+  for (let step = 0; step < steps; step++) {
+    const phase = (step / steps) * period;
+    let score = 0;
+    for (let time = phase; time < duration; time += period) {
+      const frame = Math.round(time * frameRate);
+      if (frame >= 0 && frame < flux.length) score += flux[frame];
+    }
+    if (score > best) {
+      best = score;
+      bestPhase = phase;
+    }
+  }
+  let rotation = 0;
+  let bestAccent = -Infinity;
+  for (let turn = 0; turn < 4; turn++) {
+    let accent = 0;
+    const phase = bestPhase + turn * period;
+    for (let time = phase; time < duration; time += period * 4) {
+      const frame = Math.round(time * frameRate);
+      if (frame >= 0 && frame < flux.length) accent += flux[frame];
+    }
+    if (accent > bestAccent) {
+      bestAccent = accent;
+      rotation = turn;
+    }
+  }
+  const downbeat = bestPhase + rotation * period;
+  return downbeat >= duration ? bestPhase : downbeat;
 }
 
 function mixMono(left: Float32Array, right: Float32Array): Float32Array {
@@ -166,29 +230,103 @@ function demean(values: Float32Array): Float32Array {
   return centered;
 }
 
-function firstStrongOnset(flux: Float32Array, sampleRate: number): number {
-  let max = 0;
-  for (let i = 0; i < flux.length; i++) if (flux[i] > max) max = flux[i];
-  if (max <= 0) return 0;
-  const threshold = max * 0.3;
-  for (let i = 0; i < flux.length; i++) {
-    if (flux[i] >= threshold) return i * HOP / sampleRate;
+function chordAt(
+  harmony: Float32Array,
+  bass: Float32Array | null,
+  sampleRate: number,
+  startTime: number,
+  endTime: number,
+  previous: string | null,
+  previousScore: number,
+): { name: string; score: number } {
+  const hold = { name: previous, score: previousScore };
+  if (!bass || windowRms(bass, sampleRate, startTime, endTime) < 0.01) {
+    return harmonyChord(harmony, sampleRate, startTime, endTime, previous, previousScore);
   }
-  return 0;
+  const bassChroma = chromaForRange(bass, sampleRate, startTime, endTime);
+  const bassEnergy = sumChroma(bassChroma);
+  if (bassEnergy <= 1e-8) return hold;
+  let root = 0;
+  let second = 0;
+  for (let i = 1; i < 12; i++) {
+    if (bassChroma[i] > bassChroma[root]) {
+      second = bassChroma[root];
+      root = i;
+    } else if (bassChroma[i] > second) second = bassChroma[i];
+  }
+  // Two bass notes fighting means the beat is not one chord yet.
+  if (bassChroma[root] < second * 1.35) return hold;
+  const harm = chromaForRange(harmony, sampleRate, startTime, endTime);
+  const minorThird = harm[(root + 3) % 12];
+  const majorThird = harm[(root + 4) % 12];
+  const fifth = harm[(root + 7) % 12];
+  const thirdEnergy = minorThird + majorThird;
+  if (thirdEnergy + fifth < sumChroma(harm) * 0.08) return hold;
+  let quality = "";
+  if (minorThird > majorThird * 1.25) quality = "m";
+  else if (majorThird > minorThird * 1.25) quality = "";
+  else return hold;
+  const name = `${PITCH_NAMES[root]}${quality}`;
+  const score = bassChroma[root] / bassEnergy;
+  if (previous && name !== previous && score < 0.28) return hold;
+  return { name, score };
 }
 
-function chordName(mono: Float32Array, sampleRate: number, startTime: number, endTime: number): string {
-  const chroma = chromaForRange(mono, sampleRate, startTime, endTime);
+function harmonyChord(
+  harmony: Float32Array,
+  sampleRate: number,
+  startTime: number,
+  endTime: number,
+  previous: string | null,
+  previousScore: number,
+): { name: string; score: number } {
+  const chroma = chromaForRange(harmony, sampleRate, startTime, endTime);
   let best = 0;
   let bestScore = -Infinity;
   for (let i = 0; i < TEMPLATES.length; i++) {
+    if (TEMPLATES[i].seventh) continue;
     const score = cosine(chroma, TEMPLATES[i].bins);
     if (score > bestScore) {
       bestScore = score;
       best = i;
     }
   }
-  return TEMPLATES[best].name;
+  const chosen = TEMPLATES[best];
+  if (!chosen || bestScore < 0.55) return { name: previous, score: previousScore };
+  if (previous && chosen.name !== previous && bestScore < previousScore + 0.08) {
+    return { name: previous, score: previousScore };
+  }
+  return { name: chosen.name, score: bestScore };
+}
+
+function windowRms(mono: Float32Array, sampleRate: number, startTime: number, endTime: number): number {
+  const start = Math.max(0, Math.floor(startTime * sampleRate));
+  const end = Math.min(mono.length, Math.max(start + 1, Math.floor(endTime * sampleRate)));
+  let energy = 0;
+  let count = 0;
+  for (let i = start; i < end; i += 4) {
+    const sample = mono[i] || 0;
+    energy += sample * sample;
+    count += 1;
+  }
+  return Math.sqrt(energy / Math.max(1, count));
+}
+
+function sumChroma(chroma: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += chroma[i];
+  return sum;
+}
+
+function bassPitch(bass: Float32Array, sampleRate: number, startTime: number, endTime: number): number {
+  const chroma = chromaForRange(bass, sampleRate, startTime, endTime);
+  let best = 0;
+  let energy = 0;
+  for (let i = 0; i < 12; i++) {
+    energy += chroma[i];
+    if (chroma[i] > chroma[best]) best = i;
+  }
+  return energy > 0 ? best : -1;
 }
 
 function chromaForRange(
@@ -246,19 +384,20 @@ function cosine(left: Float32Array, right: Float32Array): number {
 function buildTemplates(): Template[] {
   const templates: Template[] = [];
   for (let root = 0; root < 12; root++) {
-    templates.push({ name: PITCH_NAMES[root], bins: triad(root, 4) });
+    templates.push({ name: PITCH_NAMES[root], root, seventh: false, bins: chordBins(root, [0, 4, 7]) });
   }
   for (let root = 0; root < 12; root++) {
-    templates.push({ name: `${PITCH_NAMES[root]}m`, bins: triad(root, 3) });
+    templates.push({ name: `${PITCH_NAMES[root]}m`, root, seventh: false, bins: chordBins(root, [0, 3, 7]) });
+  }
+  for (let root = 0; root < 12; root++) {
+    templates.push({ name: `${PITCH_NAMES[root]}7`, root, seventh: true, bins: chordBins(root, [0, 4, 7, 10]) });
   }
   return templates;
 }
 
-function triad(root: number, third: number): Float32Array {
+function chordBins(root: number, intervals: number[]): Float32Array {
   const bins = new Float32Array(12);
-  bins[root] = 1;
-  bins[(root + third) % 12] = 1;
-  bins[(root + 7) % 12] = 1;
+  for (const interval of intervals) bins[(root + interval) % 12] = 1;
   return bins;
 }
 
