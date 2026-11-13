@@ -14,8 +14,16 @@ interface AsrOutput {
   chunks?: AsrChunk[];
 }
 
+interface TranscribeOptions {
+  return_timestamps: "word";
+  chunk_length_s: number;
+  stride_length_s: number;
+  num_beams: number;
+  task: "transcribe";
+}
+
 interface Transcriber {
-  (audio: Float32Array, options: { return_timestamps: "word" }): Promise<AsrOutput | AsrOutput[]>;
+  (audio: Float32Array, options: TranscribeOptions): Promise<AsrOutput | AsrOutput[]>;
   dispose?: () => Promise<void>;
 }
 
@@ -31,7 +39,8 @@ export async function transcribeVocals(
     return [];
   }
 
-  // Loaded only after the Demucs worker has been terminated.
+  // Loaded only after the separation worker has been terminated, so the two
+  // WASM heaps are not live together on a phone.
   // @ts-ignore The shell adds this package; see src/pipeline/deps-requested.txt.
   const imported = await import("@huggingface/transformers");
   const transformers = imported as {
@@ -40,6 +49,8 @@ export async function transcribeVocals(
       task: "automatic-speech-recognition",
       model: string,
       options?: {
+        device?: "wasm";
+        dtype?: "q8";
         progress_callback?: (info: { status?: string; progress?: number }) => void;
       },
     ) => Promise<Transcriber>;
@@ -50,6 +61,9 @@ export async function transcribeVocals(
     "automatic-speech-recognition",
     "Xenova/whisper-tiny",
     {
+      // q8 is the WASM size. fp32 Whisper tiny does not fit the phone budget.
+      device: "wasm",
+      dtype: "q8",
       progress_callback: (info) => {
         if (!onProgress || info.status !== "progress" || typeof info.progress !== "number") return;
         onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.75);
@@ -58,7 +72,13 @@ export async function transcribeVocals(
   );
   try {
     onProgress?.(0.85);
-    const output = await transcriber(mono, { return_timestamps: "word" });
+    const output = await transcriber(mono, {
+      return_timestamps: "word",
+      chunk_length_s: 30,
+      stride_length_s: 2,
+      num_beams: 1,
+      task: "transcribe",
+    });
     const first = Array.isArray(output) ? output[0] : output;
     const words = chunksToLyricWords(first?.chunks ?? []);
     onProgress?.(1);
