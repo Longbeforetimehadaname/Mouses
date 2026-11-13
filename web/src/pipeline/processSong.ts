@@ -42,6 +42,9 @@ export async function processSong(
     report(0.7, "Saving tracks");
     const files: { name: string; blob: Blob }[] = [{ name: "original.mp3", blob: original }];
     const vocals = { left: stems.vocals.left, right: stems.vocals.right };
+    const bass = { left: stems.bass.left, right: stems.bass.right };
+    const guitar = { left: stems.guitar.left, right: stems.guitar.right };
+    const rest = { left: stems.rest.left, right: stems.rest.right };
     for (const stem of STEM_IDS) {
       const encoded = encodeMp3(stems[stem].left, stems[stem].right, MODEL_RATE);
       await saveStem(songId, stem, encoded);
@@ -56,7 +59,15 @@ export async function processSong(
     await chain;
 
     report(0.92, "Finding chords");
-    const chords = detectChords(audio.left, audio.right, MODEL_RATE);
+    const chords = detectChords(
+      audio.left,
+      audio.right,
+      MODEL_RATE,
+      bass.left,
+      bass.right,
+      addChannels(guitar.left, rest.left, bass.left),
+      addChannels(guitar.right, rest.right, bass.right),
+    );
     await chain;
 
     const duration = audio.left.length / MODEL_RATE;
@@ -181,6 +192,20 @@ async function resampleStereo(
     left: new Float32Array(rendered.getChannelData(0)),
     right: new Float32Array(rendered.getChannelData(1)),
   };
+}
+
+function addChannels(first: Float32Array, second: Float32Array, third: Float32Array): Float32Array {
+  const length = Math.max(first.length, second.length, third.length);
+  const mixed = new Float32Array(length);
+  addChannel(mixed, first, 1);
+  addChannel(mixed, second, 0.6);
+  addChannel(mixed, third, 1.4);
+  return mixed;
+}
+
+function addChannel(destination: Float32Array, source: Float32Array, gain: number): void {
+  const length = Math.min(destination.length, source.length);
+  for (let i = 0; i < length; i++) destination[i] = (destination[i] ?? 0) + (source[i] ?? 0) * gain;
 }
 
 function pad(channel: Float32Array, length: number): Float32Array {

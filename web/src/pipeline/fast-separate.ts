@@ -24,27 +24,65 @@ function emptyStems(length) {
   return stems;
 }
 
-// The fp16 bass U-Net emits NaNs once an STFT bin is too hot, and one NaN
-// poisons every mask. Peak-normalize to 0.5, then put the level back on the stems.
-function inputGain(left, right) {
-  let peak = 0;
-  for (let i = 0; i < left.length; i++) {
-    const value = Math.abs(left[i]);
-    if (value > peak) peak = value;
-  }
-  for (let i = 0; i < right.length; i++) {
-    const value = Math.abs(right[i]);
-    if (value > peak) peak = value;
-  }
-  return peak > 0.5 ? 0.5 / peak : 1;
-}
-
 function sanitize(data) {
   for (let i = 0; i < data.length; i++) {
     const value = data[i];
     if (!Number.isFinite(value) || value < 0) data[i] = 0;
   }
   return data;
+}
+
+// Bass notes Spleeter files under "other" never reach the bass stem. A low-pass
+// does not sound like bass: the harmonics that make the note recognizable stay
+// behind. Follow each low fundamental through its harmonic series and move
+// that series from other into bass.
+const RATE = 44100;
+
+function claimBassLine(bass, source, frames, lowMidi, highMidi) {
+  for (let channel = 0; channel < 2; channel++) {
+    const base = channel * SPLIT * FREQ;
+    for (let frame = 0; frame < frames; frame++) {
+      const row = base + frame * FREQ;
+      let low = 0;
+      for (let bin = 1; bin < 28; bin++) low += source[row + bin];
+      let bestScore = 0;
+      let bestF0 = 0;
+      for (let midi = lowMidi; midi <= highMidi; midi++) {
+        const f0 = 440 * 2 ** ((midi - 69) / 12);
+        const bin0 = Math.round((f0 * N_FFT) / RATE);
+        if (bin0 < 2 || bin0 >= FREQ - 1) continue;
+        const fundamental = source[row + bin0];
+        if (fundamental < source[row + bin0 - 1] * 0.8 || fundamental < source[row + bin0 + 1] * 0.8) continue;
+        let score = 0;
+        let partials = 0;
+        for (let harmonic = 1; harmonic <= 8; harmonic++) {
+          const bin = Math.round((f0 * harmonic * N_FFT) / RATE);
+          if (bin < 1 || bin >= FREQ) break;
+          const mag = source[row + bin];
+          score += mag / harmonic;
+          if (mag > fundamental * 0.12) partials++;
+        }
+        if (partials >= 3 && score > bestScore) {
+          bestScore = score;
+          bestF0 = f0;
+        }
+      }
+      if (bestF0 <= 0 || bestScore < Math.max(low * 0.05, 0.5)) continue;
+      for (let harmonic = 1; harmonic <= 10; harmonic++) {
+        const center = (bestF0 * harmonic * N_FFT) / RATE;
+        if (center >= FREQ) break;
+        const start = Math.max(1, Math.floor(center - 1));
+        const end = Math.min(FREQ - 1, Math.ceil(center + 1));
+        for (let bin = start; bin <= end; bin++) {
+          const distance = Math.abs(bin - center);
+          const take = distance <= 0.6 ? 0.92 : 0.45;
+          const amount = source[row + bin] * take;
+          source[row + bin] -= amount;
+          bass[row + bin] += amount;
+        }
+      }
+    }
+  }
 }
 
 function fft(real, imag, inverse) {
@@ -198,7 +236,6 @@ export async function fastSeparate(left, right, runStem, onProgress) {
     return stems;
   }
 
-  const gain = inputGain(left, right);
   const frameCount = Math.ceil((PAD + length) / HOP);
   const splits = Math.ceil(frameCount / SPLIT);
   const weight = new Float32Array(length);
@@ -233,7 +270,7 @@ export async function fastSeparate(left, right, runStem, onProgress) {
         const at = (frame0 + frame) * HOP - PAD;
         for (let i = 0; i < N_FFT; i++) {
           const index = at + i;
-          fftReal[i] = index >= 0 && index < samples.length ? samples[index] * gain * WINDOW[i] : 0;
+          fftReal[i] = index >= 0 && index < samples.length ? samples[index] * WINDOW[i] : 0;
           fftImag[i] = 0;
         }
         fft(fftReal, fftImag, false);
@@ -248,9 +285,11 @@ export async function fastSeparate(left, right, runStem, onProgress) {
     }
 
     const estimates = new Array(4);
-    for (let stem = 0; stem < 4; stem++) {
-      estimates[stem] = sanitize(await runStem(stem, magnitudes));
-    }
+    for (let stem = 0; stem < 4; stem++) estimates[stem] = sanitize(await runStem(stem, magnitudes));
+    // "other" holds bass guitar the 4-stem net missed. Vocals also swallow
+    // fundamentals below the singing range; those partials belong to the bass.
+    claimBassLine(estimates[2], estimates[3], count, 28, 47);
+    claimBassLine(estimates[2], estimates[0], count, 28, 43);
     const ratios = [harmonicRatio(estimates[3], 0, count), harmonicRatio(estimates[3], 1, count)];
 
     for (let frame = 0; frame < count; frame++) {
@@ -308,19 +347,18 @@ export async function fastSeparate(left, right, runStem, onProgress) {
     onProgress?.((split + 1) / splits);
   }
 
-  const restore = gain === 1 ? 1 : 1 / gain;
   for (const id of IDS) {
     const stem = stems[id];
-    scale(stem.left, weight, restore);
-    scale(stem.right, weight, restore);
+    scale(stem.left, weight);
+    scale(stem.right, weight);
   }
   return stems;
 }
 
-function scale(channel, weight, restore) {
+function scale(channel, weight) {
   const length = Math.min(channel.length, weight.length);
   for (let i = 0; i < length; i++) {
     const divider = weight[i];
-    if (divider > 1e-8) channel[i] = channel[i] / divider * restore;
+    if (divider > 1e-8) channel[i] /= divider;
   }
 }

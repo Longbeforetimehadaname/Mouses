@@ -16,10 +16,12 @@ interface AsrOutput {
 
 interface TranscribeOptions {
   return_timestamps: "word";
-  chunk_length_s: number;
-  stride_length_s: number;
   num_beams: number;
   task: "transcribe";
+  condition_on_prev_tokens: false;
+  compression_ratio_threshold: number;
+  no_speech_threshold: number;
+  temperature: number;
 }
 
 interface Transcriber {
@@ -59,28 +61,22 @@ export async function transcribeVocals(
   onProgress?.(0.05);
   let transcriber: Transcriber | null = await transformers.pipeline(
     "automatic-speech-recognition",
-    "Xenova/whisper-tiny",
+    "Xenova/whisper-base",
     {
-      // q8 is the WASM size. fp32 Whisper tiny does not fit the phone budget.
+      // q8 stays inside the phone budget. Base hears sung words that tiny invents.
       device: "wasm",
       dtype: "q8",
       progress_callback: (info) => {
         if (!onProgress || info.status !== "progress" || typeof info.progress !== "number") return;
-        onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.75);
+        onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.35);
       },
     },
   );
   try {
-    onProgress?.(0.85);
-    const output = await transcriber(mono, {
-      return_timestamps: "word",
-      chunk_length_s: 30,
-      stride_length_s: 2,
-      num_beams: 1,
-      task: "transcribe",
+    onProgress?.(0.45);
+    const words = await transcribeChunks(transcriber, peakNormalize(mono), (fraction) => {
+      onProgress?.(0.45 + fraction * 0.55);
     });
-    const first = Array.isArray(output) ? output[0] : output;
-    const words = chunksToLyricWords(first?.chunks ?? []);
     onProgress?.(1);
     return words;
   } finally {
@@ -94,6 +90,95 @@ export async function transcribeVocals(
       }
     }
   }
+}
+
+const CHUNK_SAMPLES = WHISPER_RATE * 30;
+const HOP_SAMPLES = WHISPER_RATE * 28;
+
+async function transcribeChunks(
+  transcriber: Transcriber,
+  mono: Float32Array,
+  onProgress: (fraction: number) => void,
+): Promise<LyricWord[]> {
+  const words: LyricWord[] = [];
+  const steps = Math.max(1, Math.ceil(Math.max(1, mono.length) / HOP_SAMPLES));
+  let step = 0;
+  for (let offset = 0; offset < mono.length; offset += HOP_SAMPLES) {
+    const end = Math.min(mono.length, offset + CHUNK_SAMPLES);
+    const slice = mono.subarray(offset, end);
+    const spoken = await transcribeSlice(transcriber, slice, offset / WHISPER_RATE, offset === 0 ? 0 : 2);
+    for (const word of spoken) words.push(word);
+    step += 1;
+    onProgress(Math.min(1, step / steps));
+    if (end >= mono.length) break;
+  }
+  return words;
+}
+
+async function transcribeSlice(
+  transcriber: Transcriber,
+  slice: Float32Array,
+  offsetSec: number,
+  skipBefore: number,
+): Promise<LyricWord[]> {
+  if (rms(slice) < 0.012) return [];
+  const output = await transcriber(slice, {
+    return_timestamps: "word",
+    num_beams: 1,
+    task: "transcribe",
+    condition_on_prev_tokens: false,
+    compression_ratio_threshold: 2.4,
+    no_speech_threshold: 0.6,
+    temperature: 0,
+  });
+  const first = Array.isArray(output) ? output[0] : output;
+  const words = chunksToLyricWords(first?.chunks ?? []);
+  if (isRepeated(words)) return [];
+  const kept: LyricWord[] = [];
+  for (const word of words) {
+    if (word.start < skipBefore) continue;
+    kept.push({
+      text: word.text,
+      start: word.start + offsetSec,
+      end: word.end + offsetSec,
+    });
+  }
+  return kept;
+}
+
+function peakNormalize(mono: Float32Array): Float32Array {
+  let peak = 0;
+  for (let i = 0; i < mono.length; i++) {
+    const value = Math.abs(mono[i] ?? 0);
+    if (value > peak) peak = value;
+  }
+  if (peak < 1e-4 || (peak > 0.85 && peak < 1.05)) return mono;
+  const gain = 0.9 / peak;
+  const scaled = new Float32Array(mono.length);
+  for (let i = 0; i < mono.length; i++) scaled[i] = (mono[i] ?? 0) * gain;
+  return scaled;
+}
+
+function rms(audio: Float32Array): number {
+  let energy = 0;
+  let count = 0;
+  for (let i = 0; i < audio.length; i += 8) {
+    const value = audio[i] ?? 0;
+    energy += value * value;
+    count += 1;
+  }
+  return Math.sqrt(energy / Math.max(1, count));
+}
+
+function isRepeated(words: readonly LyricWord[]): boolean {
+  let run = 1;
+  for (let i = 1; i < words.length; i++) {
+    const current = words[i]?.text.toLowerCase();
+    const previous = words[i - 1]?.text.toLowerCase();
+    run = current && current === previous ? run + 1 : 1;
+    if (run >= 6) return true;
+  }
+  return false;
 }
 
 export function chunksToLyricWords(chunks: readonly AsrChunk[]): LyricWord[] {

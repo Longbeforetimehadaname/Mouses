@@ -70,7 +70,7 @@ The phone app calls `splitMp3` from `src/pipeline/split.ts` and renders `Player`
 
 ## Stack
 
-Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` 1.31.1 runs four Spleeter U-Nets (vocals, drums, bass, other) on WASM, one thread, with no GPU. Guitar and rest are a harmonic/percussive split of the other stem, which replaces the HTDemucs 6-stem network. `@huggingface/transformers` 4.3.2 runs quantized Whisper tiny for word-timed lyrics. There is no Python and no app server.
+Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` 1.31.1 runs four Spleeter U-Nets (vocals, drums, bass, other) on WASM, one thread, with no GPU. Bass notes that the model files under "other" are followed through their harmonics into the bass stem. Guitar and rest split what remains. `@huggingface/transformers` 4.3.2 runs quantized Whisper base for word-timed lyrics. There is no Python and no app server.
 
 ## Earlier phone UI
 
