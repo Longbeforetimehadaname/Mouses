@@ -23,24 +23,46 @@ export async function transcribeVocals(
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,
+  onProgress?: (fraction: number) => void,
 ): Promise<LyricWord[]> {
   const mono = await mixToMono16k(left, right, sampleRate);
-  if (mono.length === 0) return [];
+  if (mono.length === 0) {
+    onProgress?.(1);
+    return [];
+  }
 
   // Loaded only after the Demucs worker has been terminated.
-  const transformers = await import("@huggingface/transformers") as {
+  // @ts-ignore The shell adds this package; see src/pipeline/deps-requested.txt.
+  const imported = await import("@huggingface/transformers");
+  const transformers = imported as {
     env: { allowLocalModels: boolean };
-    pipeline: (task: "automatic-speech-recognition", model: string) => Promise<Transcriber>;
+    pipeline: (
+      task: "automatic-speech-recognition",
+      model: string,
+      options?: {
+        progress_callback?: (info: { status?: string; progress?: number }) => void;
+      },
+    ) => Promise<Transcriber>;
   };
   transformers.env.allowLocalModels = false;
+  onProgress?.(0.05);
   let transcriber: Transcriber | null = await transformers.pipeline(
     "automatic-speech-recognition",
     "Xenova/whisper-tiny",
+    {
+      progress_callback: (info) => {
+        if (!onProgress || info.status !== "progress" || typeof info.progress !== "number") return;
+        onProgress(0.05 + Math.max(0, Math.min(1, info.progress / 100)) * 0.75);
+      },
+    },
   );
   try {
+    onProgress?.(0.85);
     const output = await transcriber(mono, { return_timestamps: "word" });
     const first = Array.isArray(output) ? output[0] : output;
-    return chunksToLyricWords(first?.chunks ?? []);
+    const words = chunksToLyricWords(first?.chunks ?? []);
+    onProgress?.(1);
+    return words;
   } finally {
     const done = transcriber;
     transcriber = null;
@@ -63,13 +85,16 @@ export function chunksToLyricWords(chunks: readonly AsrChunk[]): LyricWord[] {
     const parts = (chunk.text ?? "").trim().split(/\s+/).filter((part) => part.length > 0);
     if (parts.length === 0) continue;
     if (parts.length === 1) {
-      words.push({ text: parts[0], start, end });
+      const only = parts[0];
+      if (only) words.push({ text: only, start, end });
       continue;
     }
     const step = (end - start) / parts.length;
     for (let i = 0; i < parts.length; i++) {
+      const text = parts[i];
+      if (!text) continue;
       words.push({
-        text: parts[i],
+        text,
         start: start + i * step,
         end: start + (i + 1) * step,
       });
@@ -102,8 +127,8 @@ async function mixToMono16k(
   const length = Math.max(left.length, right.length);
   const mono = new Float32Array(length);
   for (let i = 0; i < length; i++) {
-    const l = i < left.length ? left[i] : 0;
-    const r = i < right.length ? right[i] : 0;
+    const l = i < left.length ? left[i] ?? 0 : 0;
+    const r = i < right.length ? right[i] ?? 0 : 0;
     mono[i] = 0.5 * (l + r);
   }
   if (length === 0 || sampleRate === WHISPER_RATE) return mono;

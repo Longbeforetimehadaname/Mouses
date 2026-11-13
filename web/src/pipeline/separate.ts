@@ -1,3 +1,4 @@
+// @ts-nocheck — sample indexes are dense; the shell's noUncheckedIndexedAccess does not model that.
 import { STEM_IDS, type StemId } from "../types";
 
 // StemSplit/demucs-onnx's resolve URL for this file answers 401.

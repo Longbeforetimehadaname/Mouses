@@ -4,8 +4,9 @@ import * as ort from "onnxruntime-web";
 // worker would start. One thread, in this module worker, is the whole runtime.
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.proxy = false;
-// Must match the installed onnxruntime-web version.
-ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/";
+// Must match the shell lockfile (onnxruntime-web 1.31.1). The 1.31 build
+// loads ort-wasm-simd-threaded.jsep.wasm; a 1.21 wasm file will not start.
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/";
 
 const SEGMENT_SAMPLES = 343980;
 
