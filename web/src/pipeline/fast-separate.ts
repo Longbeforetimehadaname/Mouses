@@ -32,59 +32,6 @@ function sanitize(data) {
   return data;
 }
 
-// Bass notes Spleeter files under "other" never reach the bass stem. A low-pass
-// does not sound like bass: the harmonics that make the note recognizable stay
-// behind. Follow each low fundamental through its harmonic series and move
-// that series from other into bass.
-const RATE = 44100;
-
-function claimBassLine(bass, source, frames, lowMidi, highMidi) {
-  for (let channel = 0; channel < 2; channel++) {
-    const base = channel * SPLIT * FREQ;
-    for (let frame = 0; frame < frames; frame++) {
-      const row = base + frame * FREQ;
-      let low = 0;
-      for (let bin = 1; bin < 28; bin++) low += source[row + bin];
-      let bestScore = 0;
-      let bestF0 = 0;
-      for (let midi = lowMidi; midi <= highMidi; midi++) {
-        const f0 = 440 * 2 ** ((midi - 69) / 12);
-        const bin0 = Math.round((f0 * N_FFT) / RATE);
-        if (bin0 < 2 || bin0 >= FREQ - 1) continue;
-        const fundamental = source[row + bin0];
-        if (fundamental < source[row + bin0 - 1] * 0.8 || fundamental < source[row + bin0 + 1] * 0.8) continue;
-        let score = 0;
-        let partials = 0;
-        for (let harmonic = 1; harmonic <= 8; harmonic++) {
-          const bin = Math.round((f0 * harmonic * N_FFT) / RATE);
-          if (bin < 1 || bin >= FREQ) break;
-          const mag = source[row + bin];
-          score += mag / harmonic;
-          if (mag > fundamental * 0.12) partials++;
-        }
-        if (partials >= 3 && score > bestScore) {
-          bestScore = score;
-          bestF0 = f0;
-        }
-      }
-      if (bestF0 <= 0 || bestScore < Math.max(low * 0.05, 0.5)) continue;
-      for (let harmonic = 1; harmonic <= 10; harmonic++) {
-        const center = (bestF0 * harmonic * N_FFT) / RATE;
-        if (center >= FREQ) break;
-        const start = Math.max(1, Math.floor(center - 1));
-        const end = Math.min(FREQ - 1, Math.ceil(center + 1));
-        for (let bin = start; bin <= end; bin++) {
-          const distance = Math.abs(bin - center);
-          const take = distance <= 0.6 ? 0.92 : 0.45;
-          const amount = source[row + bin] * take;
-          source[row + bin] -= amount;
-          bass[row + bin] += amount;
-        }
-      }
-    }
-  }
-}
-
 function fft(real, imag, inverse) {
   const n = real.length;
   for (let i = 1, j = 0; i < n; i++) {
@@ -286,10 +233,6 @@ export async function fastSeparate(left, right, runStem, onProgress) {
 
     const estimates = new Array(4);
     for (let stem = 0; stem < 4; stem++) estimates[stem] = sanitize(await runStem(stem, magnitudes));
-    // "other" holds bass guitar the 4-stem net missed. Vocals also swallow
-    // fundamentals below the singing range; those partials belong to the bass.
-    claimBassLine(estimates[2], estimates[3], count, 28, 47);
-    claimBassLine(estimates[2], estimates[0], count, 28, 43);
     const ratios = [harmonicRatio(estimates[3], 0, count), harmonicRatio(estimates[3], 1, count)];
 
     for (let frame = 0; frame < count; frame++) {

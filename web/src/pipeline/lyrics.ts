@@ -16,6 +16,8 @@ interface AsrOutput {
 
 interface TranscribeOptions {
   return_timestamps: "word";
+  chunk_length_s: number;
+  stride_length_s: number;
   num_beams: number;
   task: "transcribe";
   condition_on_prev_tokens: false;
@@ -92,38 +94,16 @@ export async function transcribeVocals(
   }
 }
 
-const CHUNK_SAMPLES = WHISPER_RATE * 30;
-const HOP_SAMPLES = WHISPER_RATE * 28;
-
 async function transcribeChunks(
   transcriber: Transcriber,
   mono: Float32Array,
   onProgress: (fraction: number) => void,
 ): Promise<LyricWord[]> {
-  const words: LyricWord[] = [];
-  const steps = Math.max(1, Math.ceil(Math.max(1, mono.length) / HOP_SAMPLES));
-  let step = 0;
-  for (let offset = 0; offset < mono.length; offset += HOP_SAMPLES) {
-    const end = Math.min(mono.length, offset + CHUNK_SAMPLES);
-    const slice = mono.subarray(offset, end);
-    const spoken = await transcribeSlice(transcriber, slice, offset / WHISPER_RATE, offset === 0 ? 0 : 2);
-    for (const word of spoken) words.push(word);
-    step += 1;
-    onProgress(Math.min(1, step / steps));
-    if (end >= mono.length) break;
-  }
-  return words;
-}
-
-async function transcribeSlice(
-  transcriber: Transcriber,
-  slice: Float32Array,
-  offsetSec: number,
-  skipBefore: number,
-): Promise<LyricWord[]> {
-  if (rms(slice) < 0.012) return [];
-  const output = await transcriber(slice, {
+  onProgress(0.05);
+  const output = await transcriber(mono, {
     return_timestamps: "word",
+    chunk_length_s: 30,
+    stride_length_s: 2,
     num_beams: 1,
     task: "transcribe",
     condition_on_prev_tokens: false,
@@ -131,19 +111,30 @@ async function transcribeSlice(
     no_speech_threshold: 0.6,
     temperature: 0,
   });
+  onProgress(0.9);
   const first = Array.isArray(output) ? output[0] : output;
   const words = chunksToLyricWords(first?.chunks ?? []);
-  if (isRepeated(words)) return [];
   const kept: LyricWord[] = [];
   for (const word of words) {
-    if (word.start < skipBefore) continue;
-    kept.push({
-      text: word.text,
-      start: word.start + offsetSec,
-      end: word.end + offsetSec,
-    });
+    // Drop a word that does not sit on the vocal. That is a guess, not singing.
+    if (regionRms(mono, word.start, word.end) < 0.015) continue;
+    kept.push(word);
   }
+  onProgress(1);
   return kept;
+}
+
+function regionRms(mono: Float32Array, startSec: number, endSec: number): number {
+  const start = Math.max(0, Math.floor(startSec * WHISPER_RATE));
+  const end = Math.min(mono.length, Math.max(start + 1, Math.ceil(endSec * WHISPER_RATE)));
+  let energy = 0;
+  let count = 0;
+  for (let i = start; i < end; i += 4) {
+    const sample = mono[i] ?? 0;
+    energy += sample * sample;
+    count += 1;
+  }
+  return Math.sqrt(energy / Math.max(1, count));
 }
 
 function peakNormalize(mono: Float32Array): Float32Array {
@@ -157,28 +148,6 @@ function peakNormalize(mono: Float32Array): Float32Array {
   const scaled = new Float32Array(mono.length);
   for (let i = 0; i < mono.length; i++) scaled[i] = (mono[i] ?? 0) * gain;
   return scaled;
-}
-
-function rms(audio: Float32Array): number {
-  let energy = 0;
-  let count = 0;
-  for (let i = 0; i < audio.length; i += 8) {
-    const value = audio[i] ?? 0;
-    energy += value * value;
-    count += 1;
-  }
-  return Math.sqrt(energy / Math.max(1, count));
-}
-
-function isRepeated(words: readonly LyricWord[]): boolean {
-  let run = 1;
-  for (let i = 1; i < words.length; i++) {
-    const current = words[i]?.text.toLowerCase();
-    const previous = words[i - 1]?.text.toLowerCase();
-    run = current && current === previous ? run + 1 : 1;
-    if (run >= 6) return true;
-  }
-  return false;
 }
 
 export function chunksToLyricWords(chunks: readonly AsrChunk[]): LyricWord[] {

@@ -9,10 +9,10 @@ ort.env.wasm.proxy = false;
 // Must match the shell lockfile (onnxruntime-web 1.31.1).
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/";
 
-// Deezer Spleeter 4-stem U-Nets, fp16 weights, public ONNX export.
-// Order is the index fastSeparate passes to runStem: vocals, drums, bass, other.
+// Deezer Spleeter 4-stem U-Nets. Bass is the fp32 graph: the fp16 bass file
+// emits NaNs on loud notes and the stem goes silent. Order matches runStem.
 const MODEL_BASE = "https://huggingface.co/Best-Practice/spleeter-4stems-onnx/resolve/main/";
-const MODEL_NAMES = ["vocals", "drums", "bass", "other"];
+const MODEL_FILES = ["vocals.fp16.onnx", "drums.fp16.onnx", "bass.onnx", "other.fp16.onnx"];
 
 const scope = globalThis;
 let queue = Promise.resolve();
@@ -49,10 +49,10 @@ async function dispatch(message) {
 
 async function loadSessions(onFraction) {
   const sessions = [];
-  for (let index = 0; index < MODEL_NAMES.length; index++) {
-    const name = MODEL_NAMES[index];
-    const bytes = await loadModel(`${MODEL_BASE}${name}.fp16.onnx`, (fraction) => {
-      onFraction((index + fraction) / MODEL_NAMES.length);
+  for (let index = 0; index < MODEL_FILES.length; index++) {
+    const file = MODEL_FILES[index];
+    const bytes = await loadModel(`${MODEL_BASE}${file}`, (fraction) => {
+      onFraction((index + fraction) / MODEL_FILES.length);
     });
     sessions.push(await createSession(bytes));
   }

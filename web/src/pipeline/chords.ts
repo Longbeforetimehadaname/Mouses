@@ -39,19 +39,35 @@ export function detectChords(
   const beats: ChordBeat[] = [];
   let previous: string | null = null;
   let previousScore = 0;
+  let pending: string | null = null;
+  let pendingScore = 0;
   for (let index = 0, time = downbeat; time < duration - 1e-4; index++, time += spacing) {
     const next = Math.min(duration, time + spacing);
     let regionStart = time;
     if (next - regionStart < spacing * 0.5) regionStart = Math.max(0, next - spacing);
     const named = chordAt(harmony, bass, sampleRate, regionStart, next, previous, previousScore);
+    const candidate = named.name;
+    let shown: string | null = null;
+    if (!candidate || candidate === previous) {
+      pending = null;
+    } else if (pending === candidate) {
+      // The same new name won twice. Put it on the beat where it started.
+      const prior = beats[beats.length - 1];
+      if (prior && prior.chord === null) prior.chord = candidate;
+      shown = null;
+      previous = candidate;
+      previousScore = pendingScore;
+      pending = null;
+    } else {
+      pending = candidate;
+      pendingScore = named.score;
+    }
     beats.push({
       bar: Math.floor(index / 4),
       beat: index % 4,
-      chord: named.name === previous ? null : named.name,
+      chord: shown,
       time,
     });
-    previous = named.name;
-    previousScore = named.score;
   }
   return { bpm, beats };
 }
@@ -215,7 +231,7 @@ function demean(values: Float32Array): Float32Array {
 }
 
 function chordAt(
-  mono: Float32Array,
+  harmony: Float32Array,
   bass: Float32Array | null,
   sampleRate: number,
   startTime: number,
@@ -223,37 +239,77 @@ function chordAt(
   previous: string | null,
   previousScore: number,
 ): { name: string; score: number } {
-  const chroma = chromaForRange(mono, sampleRate, startTime, endTime);
-  const root = bass ? bassPitch(bass, sampleRate, startTime, endTime) : -1;
-  if (root >= 0) chroma[root] += sumChroma(chroma) * 0.45;
+  const hold = { name: previous, score: previousScore };
+  if (!bass || windowRms(bass, sampleRate, startTime, endTime) < 0.01) {
+    return harmonyChord(harmony, sampleRate, startTime, endTime, previous, previousScore);
+  }
+  const bassChroma = chromaForRange(bass, sampleRate, startTime, endTime);
+  const bassEnergy = sumChroma(bassChroma);
+  if (bassEnergy <= 1e-8) return hold;
+  let root = 0;
+  let second = 0;
+  for (let i = 1; i < 12; i++) {
+    if (bassChroma[i] > bassChroma[root]) {
+      second = bassChroma[root];
+      root = i;
+    } else if (bassChroma[i] > second) second = bassChroma[i];
+  }
+  // Two bass notes fighting means the beat is not one chord yet.
+  if (bassChroma[root] < second * 1.35) return hold;
+  const harm = chromaForRange(harmony, sampleRate, startTime, endTime);
+  const minorThird = harm[(root + 3) % 12];
+  const majorThird = harm[(root + 4) % 12];
+  const fifth = harm[(root + 7) % 12];
+  const thirdEnergy = minorThird + majorThird;
+  if (thirdEnergy + fifth < sumChroma(harm) * 0.08) return hold;
+  let quality = "";
+  if (minorThird > majorThird * 1.25) quality = "m";
+  else if (majorThird > minorThird * 1.25) quality = "";
+  else return hold;
+  const name = `${PITCH_NAMES[root]}${quality}`;
+  const score = bassChroma[root] / bassEnergy;
+  if (previous && name !== previous && score < 0.28) return hold;
+  return { name, score };
+}
+
+function harmonyChord(
+  harmony: Float32Array,
+  sampleRate: number,
+  startTime: number,
+  endTime: number,
+  previous: string | null,
+  previousScore: number,
+): { name: string; score: number } {
+  const chroma = chromaForRange(harmony, sampleRate, startTime, endTime);
   let best = 0;
   let bestScore = -Infinity;
-  let bestTriad = -Infinity;
   for (let i = 0; i < TEMPLATES.length; i++) {
-    let score = cosine(chroma, TEMPLATES[i].bins);
-    if (root >= 0 && TEMPLATES[i].root === root) score += 0.18;
-    if (!TEMPLATES[i].seventh && score > bestTriad) bestTriad = score;
+    if (TEMPLATES[i].seventh) continue;
+    const score = cosine(chroma, TEMPLATES[i].bins);
     if (score > bestScore) {
       bestScore = score;
       best = i;
     }
   }
-  let chosen = TEMPLATES[best];
-  if (chosen.seventh && bestScore < bestTriad + 0.06) {
-    bestScore = bestTriad;
-    for (let i = 0; i < TEMPLATES.length; i++) {
-      if (TEMPLATES[i].seventh) continue;
-      const score = cosine(chroma, TEMPLATES[i].bins) + (root >= 0 && TEMPLATES[i].root === root ? 0.18 : 0);
-      if (score >= bestScore) {
-        bestScore = score;
-        chosen = TEMPLATES[i];
-      }
-    }
-  }
-  if (previous && chosen.name !== previous && bestScore < previousScore + 0.07) {
+  const chosen = TEMPLATES[best];
+  if (!chosen || bestScore < 0.55) return { name: previous, score: previousScore };
+  if (previous && chosen.name !== previous && bestScore < previousScore + 0.08) {
     return { name: previous, score: previousScore };
   }
   return { name: chosen.name, score: bestScore };
+}
+
+function windowRms(mono: Float32Array, sampleRate: number, startTime: number, endTime: number): number {
+  const start = Math.max(0, Math.floor(startTime * sampleRate));
+  const end = Math.min(mono.length, Math.max(start + 1, Math.floor(endTime * sampleRate)));
+  let energy = 0;
+  let count = 0;
+  for (let i = start; i < end; i += 4) {
+    const sample = mono[i] || 0;
+    energy += sample * sample;
+    count += 1;
+  }
+  return Math.sqrt(energy / Math.max(1, count));
 }
 
 function sumChroma(chroma: Float32Array): number {
