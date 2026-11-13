@@ -45,9 +45,13 @@ async function loadModel(modelUrl: string): Promise<void> {
   });
   const options: ort.InferenceSession.SessionOptions = {
     executionProviders: ["wasm"],
-    graphOptimizationLevel: "all",
-    // Accepted by onnxruntime-web 1.21's WASM backend. Off, so terminating the
-    // worker can release the session heap before lyrics load.
+    // "all" materializes the HTDemucs graph in one pass and the wasm heap
+    // throws std::bad_alloc before the first segment can run. Disabled still
+    // executes the 1.31.1 wasm session; it just skips that planning copy.
+    graphOptimizationLevel: "disabled",
+    enableMemPattern: false,
+    executionMode: "sequential",
+    // Off, so terminating the worker can release the session heap before lyrics load.
     enableCpuMemArena: false,
   };
   session = await ort.InferenceSession.create(bytes, options);

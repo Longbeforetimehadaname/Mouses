@@ -46,9 +46,9 @@ Sync uploads and downloads song files in a Drive folder named `Mouses`. Each son
 
 ## Pipeline and player
 
-This branch is the shell. It calls `splitMp3` from `src/pipeline/split.ts` and renders `Player` from `src/player/Player.tsx`. Those modules belong to the other branches and are not committed here.
+The phone app calls `splitMp3` from `src/pipeline/split.ts` and renders `Player` from `src/player/Player.tsx`. Those are the real modules: Demucs, Whisper, and chord detection in the browser, and the stem mixer with synced lyrics and a 4/4 chord grid.
 
-`npm run dev` and `npm run build` generate temporary stubs at those paths when the real files are absent, then the build deletes stubs that still carry the `@mouses-temporary-stub` marker. `.gitignore` lists the two paths so a stub left behind is not committed. Tracked files from the other branches stay tracked; the script does not overwrite a file that lacks the marker.
+`npm run dev` and `npm run build` generate temporary stubs at those paths only when the real files are absent, then the build deletes stubs that still carry the `@mouses-temporary-stub` marker. `.gitignore` lists the two paths so a stub left behind is not committed. Tracked files stay tracked; the script does not overwrite a file that lacks the marker.
 
 `splitMp3` matches `SplitMp3` in `src/contract.ts`. The shell calls it with a copy of the MP3 `ArrayBuffer` and renders `SplitProgress` (`stage`, `fraction` from 0 to 1) while it runs.
 
@@ -70,10 +70,8 @@ This branch is the shell. It calls `splitMp3` from `src/pipeline/split.ts` and r
 
 ## Stack
 
-Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` is declared for the pipeline branch; this shell does not import it.
-
-Dependencies the other branches should not need to add: `react`, `react-dom`, `vite`, `typescript`, `vite-plugin-pwa`, `idb`, `onnxruntime-web`, plus `@vitejs/plugin-react`, `@types/react`, and `@types/react-dom`.
+Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` 1.31.1 runs Demucs. `@huggingface/transformers` 4.3.2 runs Whisper. There is no Python and no app server.
 
 ## Earlier phone UI
 
-`web/` is an earlier phone UI already on this branch, with its own `package.json`. GitHub Actions in `.github/workflows/pages.yml` builds that folder for GitHub Pages. The shell the pipeline and player branches plug into is the app at the repository root.
+`web/` is an earlier phone UI, with its own `package.json`. GitHub Actions in `.github/workflows/pages.yml` builds that folder for GitHub Pages. The phone app is the repository root.
