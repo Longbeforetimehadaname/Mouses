@@ -38,7 +38,9 @@ export function SongTabs({
               const current = TABS.findIndex((entry) => entry.id === tab);
               const delta = event.key === "ArrowRight" ? 1 : -1;
               const next = (current + delta + TABS.length) % TABS.length;
-              onChange(TABS[next].id);
+              const nextTab = TABS[next];
+              if (!nextTab) return;
+              onChange(nextTab.id);
               buttons.current[next]?.focus();
             }}
           >

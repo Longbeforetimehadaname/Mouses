@@ -51,10 +51,10 @@ export function TrackStrip({
           onChange={(event) => onVolume(Number(event.target.value))}
         />
       </div>
-      <button type="button" className={mute ? "is-on" : undefined} aria-pressed={mute} onClick={onMute}>
+      <button type="button" className={mute ? "is-on" : undefined} aria-pressed={mute} aria-label={`Mute ${label}`} onClick={onMute}>
         Mute
       </button>
-      <button type="button" className={solo ? "is-on" : undefined} aria-pressed={solo} onClick={onSolo}>
+      <button type="button" className={solo ? "is-on" : undefined} aria-pressed={solo} aria-label={`Solo ${label}`} onClick={onSolo}>
         Solo
       </button>
     </div>

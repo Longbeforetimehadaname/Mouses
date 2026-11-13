@@ -18,7 +18,7 @@ export class StemEngine {
   private readonly wanted = new Map<StemId, number>();
   private readonly sources: MediaElementAudioSourceNode[] = [];
   private readonly listeners = new Set<(time: number) => void>();
-  private readonly leadId: StemId = STEM_IDS[0];
+  private readonly leadId: StemId = STEM_IDS[0] ?? "drums";
 
   private context: AudioContext | null = null;
   private pitchNode: AudioWorkletNode | null = null;
@@ -32,6 +32,11 @@ export class StemEngine {
   private driftTimer: ReturnType<typeof setInterval> | null = null;
   private raf: number | null = null;
   private unlockFrame: number | null = null;
+  private songBpm = 120;
+  private clickEnabled = false;
+  private clickTimer: ReturnType<typeof setInterval> | null = null;
+  private clickBus: GainNode | null = null;
+  private readonly firedBeats = new Set<number>();
 
   constructor(urls: Record<StemId, string>) {
     this.urls = { ...urls };
@@ -97,6 +102,7 @@ export class StemEngine {
     const pending: Promise<void>[] = [];
     for (const audio of this.elements.values()) pending.push(audio.play());
     this.startDrift();
+    if (this.clickEnabled) this.startClicks();
     this.kickRaf();
     this.emit();
     this.scheduleUnlock();
@@ -104,6 +110,7 @@ export class StemEngine {
       if (this.disposed || this.anyPlaying()) return;
       this.playingFlag = false;
       this.stopDrift();
+      this.stopClicks();
       this.stopRaf();
       this.emit();
     });
@@ -114,6 +121,7 @@ export class StemEngine {
     this.pausing = true;
     this.playingFlag = false;
     this.stopDrift();
+    this.stopClicks();
     this.stopRaf();
     for (const audio of this.elements.values()) audio.pause();
     this.pausing = false;
@@ -128,7 +136,22 @@ export class StemEngine {
     for (const audio of this.elements.values()) {
       if (audio.readyState >= 1) this.setTime(audio, time);
     }
+    this.firedBeats.clear();
     this.emit();
+  }
+
+  /** Song tempo used to place the beat click. Playback speed stays on setTempo. */
+  setSongBpm(bpm: number): void {
+    if (!Number.isFinite(bpm) || bpm <= 0) return;
+    this.songBpm = bpm;
+    this.firedBeats.clear();
+  }
+
+  setClick(enabled: boolean): void {
+    this.clickEnabled = enabled;
+    if (!this.playingFlag) return;
+    if (enabled) this.startClicks();
+    else this.stopClicks();
   }
 
   setStem(id: StemId, volume: number, mute: boolean, solo: boolean, anySolo: boolean): void {
@@ -146,6 +169,7 @@ export class StemEngine {
       this.unlock(audio);
     }
     this.applyPitch();
+    this.firedBeats.clear();
     this.scheduleUnlock();
   }
 
@@ -165,6 +189,9 @@ export class StemEngine {
     this.disposed = true;
     this.playingFlag = false;
     this.stopDrift();
+    this.stopClicks();
+    this.clickBus?.disconnect();
+    this.clickBus = null;
     this.stopRaf();
     if (this.unlockFrame != null) {
       cancelAnimationFrame(this.unlockFrame);
@@ -379,6 +406,72 @@ export class StemEngine {
       if (!audio.paused && !audio.ended) return true;
     }
     return false;
+  }
+
+  private startClicks(): void {
+    if (this.clickTimer != null || !this.clickEnabled) return;
+    this.clickTimer = setInterval(() => this.scheduleClicks(), 25);
+    this.scheduleClicks();
+  }
+
+  private stopClicks(): void {
+    if (this.clickTimer != null) clearInterval(this.clickTimer);
+    this.clickTimer = null;
+    this.firedBeats.clear();
+  }
+
+  private scheduleClicks(): void {
+    const ctx = this.context;
+    if (!this.playingFlag || !this.clickEnabled || !ctx || this.disposed || !(this.tempo > 0)) return;
+    const bus = this.ensureClickBus();
+    if (!bus) return;
+    const now = ctx.currentTime;
+    const mediaNow = this.currentTime;
+    const beatDur = 60 / this.songBpm;
+    let beat = Math.floor(mediaNow / beatDur);
+    if (beat < 0) beat = 0;
+    const horizon = now + 0.16;
+    for (let step = 0; step < 6; step++) {
+      const mediaAt = beat * beatDur;
+      const when = now + (mediaAt - mediaNow) / this.tempo;
+      if (when > horizon) break;
+      if (when >= now - 0.025 && !this.firedBeats.has(beat)) {
+        this.playClick(beat, Math.max(when, now), bus);
+        this.firedBeats.add(beat);
+      }
+      beat += 1;
+    }
+    for (const fired of this.firedBeats) {
+      if (fired < beat - 8) this.firedBeats.delete(fired);
+    }
+  }
+
+  private ensureClickBus(): GainNode | null {
+    const ctx = this.context;
+    if (!ctx || ctx.state === "closed") return null;
+    if (this.clickBus) return this.clickBus;
+    const bus = ctx.createGain();
+    bus.gain.value = 0.9;
+    bus.connect(ctx.destination);
+    this.clickBus = bus;
+    return bus;
+  }
+
+  private playClick(beat: number, when: number, bus: GainNode): void {
+    const ctx = this.context;
+    if (!ctx || ctx.state === "closed") return;
+    const accent = beat % 4 === 0;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(accent ? 1760 : 1175, when);
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.16 : 0.08, when + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.04);
+    osc.connect(gain);
+    gain.connect(bus);
+    osc.start(when);
+    osc.stop(when + 0.05);
   }
 
   private element(id: StemId): HTMLAudioElement {

@@ -87,6 +87,7 @@ function buildChordGrid(beats: ChordBeat[], time: number): {
       const cells: (ChordBeat | null)[] = [null, null, null, null];
       for (let col = 0; col < 4 && i + col < beats.length; col++) {
         const beat = beats[i + col];
+        if (!beat) continue;
         cells[col] = beat;
         if (beat === current) {
           activeRow = id;

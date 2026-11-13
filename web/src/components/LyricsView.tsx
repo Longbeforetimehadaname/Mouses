@@ -18,7 +18,7 @@ export function LyricsView({ words, time }: { words: LyricWord[]; time: number }
     let found = -1;
     for (let i = 0; i < words.length; i++) {
       const word = words[i];
-      if (time >= word.start && time <= word.end) found = i;
+      if (word && time >= word.start && time <= word.end) found = i;
     }
     return found;
   }, [words, time]);

@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
 import type { StemEngine } from "../audio/engine";
 
-export function TempoControl({ engine }: { engine: StemEngine }) {
-  const [on, setOn] = useState(false);
+export function TempoControl({ engine, bpm }: { engine: StemEngine; bpm?: number }) {
+  const songBpm = typeof bpm === "number" && bpm > 0 ? bpm : 0;
+  const [on, setOn] = useState(songBpm > 0);
   const [percent, setPercent] = useState(100);
+  const shownBpm = Math.round((songBpm > 0 ? songBpm : 120) * (percent / 100));
 
   useEffect(() => {
     engine.setTempo(percent / 100);
   }, [engine, percent]);
+
+  useEffect(() => {
+    engine.setSongBpm(songBpm > 0 ? songBpm : 120);
+    engine.setClick(on);
+  }, [engine, on, songBpm]);
 
   return (
     <div className="tempo-control">
@@ -15,14 +22,16 @@ export function TempoControl({ engine }: { engine: StemEngine }) {
         type="button"
         className={on ? "tempo-toggle is-on" : "tempo-toggle"}
         aria-pressed={on}
-        aria-label="Metronome"
+        aria-label="Beat click"
         onClick={() => setOn((value) => !value)}
       >
         <MetronomeIcon />
       </button>
       {on ? (
         <label className="tempo-slider">
-          <span className="tempo-readout">{percent}%</span>
+          <span className="tempo-readout" data-testid="bpm">
+            {songBpm > 0 ? `${shownBpm} BPM` : `${percent}%`}
+          </span>
           <input
             type="range"
             min={50}
@@ -30,7 +39,7 @@ export function TempoControl({ engine }: { engine: StemEngine }) {
             step={1}
             value={percent}
             aria-label="Tempo"
-            aria-valuetext={`${percent} percent`}
+            aria-valuetext={songBpm > 0 ? `${shownBpm} beats per minute` : `${percent} percent`}
             onChange={(event) => setPercent(Number(event.target.value))}
           />
         </label>

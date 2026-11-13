@@ -14,7 +14,7 @@ interface Channel {
   solo: boolean;
 }
 
-export function Mixer({ engine }: { engine: StemEngine }) {
+export function Mixer({ engine, bpm }: { engine: StemEngine; bpm?: number }) {
   const [channels, setChannels] = useState(defaultChannels);
 
   useEffect(() => {
@@ -22,9 +22,10 @@ export function Mixer({ engine }: { engine: StemEngine }) {
   }, [engine]);
 
   useEffect(() => {
-    const anySolo = STEM_IDS.some((id) => channels[id].solo);
+    const anySolo = STEM_IDS.some((id) => channels[id]?.solo);
     for (const id of STEM_IDS) {
       const channel = channels[id];
+      if (!channel) continue;
       engine.setStem(id, channel.volume, channel.mute, channel.solo, anySolo);
     }
   }, [engine, channels]);
@@ -34,6 +35,7 @@ export function Mixer({ engine }: { engine: StemEngine }) {
       <div className="mixer-strips">
         {STEM_IDS.map((id) => {
           const channel = channels[id];
+          if (!channel) return null;
           return (
             <TrackStrip
               key={id}
@@ -49,7 +51,7 @@ export function Mixer({ engine }: { engine: StemEngine }) {
         })}
       </div>
       <Transport engine={engine} />
-      <TempoControl engine={engine} />
+      <TempoControl engine={engine} bpm={bpm} />
     </section>
   );
 }
@@ -60,8 +62,10 @@ function patchChannel(
   patch: Partial<Channel> | ((channel: Channel) => Partial<Channel>),
 ): void {
   setChannels((prev) => {
-    const next = typeof patch === "function" ? patch(prev[id]) : patch;
-    return { ...prev, [id]: { ...prev[id], ...next } };
+    const current = prev[id];
+    if (!current) return prev;
+    const next = typeof patch === "function" ? patch(current) : patch;
+    return { ...prev, [id]: { ...current, ...next } };
   });
 }
 
