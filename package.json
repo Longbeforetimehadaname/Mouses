@@ -1,0 +1,27 @@
+{
+  "name": "mouses",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Phone home screen for splitting songs into stems and keeping them on the device.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/with-stubs.mjs vite --host 0.0.0.0 --port 5173",
+    "build": "node scripts/with-stubs.mjs --build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2",
+    "idb": "^8.0.4",
+    "onnxruntime-web": "^1.31.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-pwa": "^2.0.0"
+  }
+}
