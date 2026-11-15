@@ -30,7 +30,7 @@ export const splitMp3: SplitMp3 = async (file, onProgress) => {
   onProgress({ stage: "Reading lyrics", fraction: 0.9 });
 
   onProgress({ stage: "Finding chords", fraction: 0.92 });
-  const harmonic = harmonicMix(separated);
+  const harmonic = chordMix(separated);
   const found = detectChords(
     decoded.left,
     decoded.right,
@@ -90,24 +90,19 @@ function chordChanges(
   return changes;
 }
 
-function harmonicMix(separated: {
-  bass: { left: Float32Array; right: Float32Array };
+function chordMix(separated: {
   guitar: { left: Float32Array; right: Float32Array };
   rest: { left: Float32Array; right: Float32Array };
 }): { left: Float32Array; right: Float32Array } {
-  const length = Math.max(
-    separated.bass.left.length,
-    separated.guitar.left.length,
-    separated.rest.left.length,
-  );
+  // Guitar and the rest of the accompaniment. The bass stem is passed beside
+  // this mix, so a passing bass note is not read as a new chord root.
+  const length = Math.max(separated.guitar.left.length, separated.rest.left.length);
   const left = new Float32Array(length);
   const right = new Float32Array(length);
-  addInto(left, separated.bass.left, 1.4);
-  addInto(right, separated.bass.right, 1.4);
   addInto(left, separated.guitar.left, 1);
   addInto(right, separated.guitar.right, 1);
-  addInto(left, separated.rest.left, 0.6);
-  addInto(right, separated.rest.right, 0.6);
+  addInto(left, separated.rest.left, 0.7);
+  addInto(right, separated.rest.right, 0.7);
   return { left, right };
 }
 
