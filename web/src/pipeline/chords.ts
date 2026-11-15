@@ -11,7 +11,7 @@ const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
 
 // A new triad has to clear this, and beat the chord already sounding, or the beat stays put.
 const START_SCORE = 0.76;
-const STRONG_SCORE = 0.8;
+const STRONG_SCORE = 0.72;
 const CHANGE_MARGIN = 0.08;
 // The 5th partial of the root sits a little flat of the major third, so a near-tie goes to major.
 const MAJOR_BIAS = 0.1;
@@ -56,14 +56,17 @@ export function detectChords(
   const duration = mono.length / sampleRate;
   const spacing = 60 / bpm;
   const phase = beatPhase(onsets.full, sampleRate, bpm, duration);
+  const tuning = estimateSongTuning(harmony, sampleRate);
   const observed: BeatView[] = [];
   for (let time = phase; time < duration - 1e-4; time += spacing) {
     const end = Math.min(duration, time + spacing);
-    observed.push(observeBeat(harmony, bass, sampleRate, time, end));
+    observed.push(observeBeat(harmony, bass, sampleRate, time, end, tuning));
   }
   if (observed.length === 0) return { bpm, beats: [] };
 
-  const smoothed = holdChords(observed);
+  const scale = songScale(observed);
+  for (const view of observed) view.best = bestTriad(view.chroma, view.bassPc, view.bassConf, scale);
+  const smoothed = holdChords(observed, scale);
   const rotation = chooseRotation(smoothed, observed, onsets.low, sampleRate);
   const beats: ChordBeat[] = [];
   let previous: string | null = null;
@@ -87,7 +90,7 @@ export function detectChords(
  * An uncertain beat keeps the chord that is already sounding. A clear new triad
  * is written on the beat it starts; a milder one has to win twice.
  */
-function holdChords(observed: BeatView[]): (Triad | null)[] {
+function holdChords(observed: BeatView[], scale: Uint8Array | null): (Triad | null)[] {
   const labels: (Triad | null)[] = [];
   let held: Triad | null = null;
   let pending: { root: number; minor: boolean; index: number } | null = null;
@@ -100,8 +103,11 @@ function holdChords(observed: BeatView[]): (Triad | null)[] {
       continue;
     }
     const same = !!best && best.root === held.root && best.minor === held.minor;
-    const stuck = view ? triadScore(view.chroma, held.root, held.minor, view.bassPc, view.bassConf) : 0;
-    const clear = !!best && best.score >= stuck + CHANGE_MARGIN && !same;
+    const stuck = view ? triadScore(view.chroma, held.root, held.minor, view.bassPc, view.bassConf, scale) : 0;
+    // C and Am share two notes. A quiet Am only has to edge out the C it follows.
+    const toRelativeMinor = !!best && best.minor && !held.minor && best.root === (held.root + 9) % 12 && stuck < 0.78;
+    const needed = stuck + (toRelativeMinor ? 0 : CHANGE_MARGIN);
+    const clear = !!best && best.score >= needed && !same;
     if (!best || same || !clear || best.score < 0.7) {
       pending = null;
       labels.push(held);
@@ -132,8 +138,9 @@ function observeBeat(
   sampleRate: number,
   start: number,
   end: number,
+  tuning: number,
 ): BeatView {
-  const chroma = beatChroma(harmony, sampleRate, start, end);
+  const chroma = beatChroma(harmony, sampleRate, start, end, tuning);
   const low = bass ? bassPitch(bass, sampleRate, start, end) : null;
   const bassPc = low ? low.pc : -1;
   const bassConf = low ? low.confidence : 0;
@@ -142,15 +149,20 @@ function observeBeat(
     chroma,
     bassPc,
     bassConf,
-    best: bestTriad(chroma, bassPc, bassConf),
+    best: null,
   };
 }
 
-function bestTriad(chroma: Float32Array, bassPc: number, bassConf: number): Triad | null {
+function bestTriad(
+  chroma: Float32Array,
+  bassPc: number,
+  bassConf: number,
+  scale: Uint8Array | null,
+): Triad | null {
   let best: Triad | null = null;
   for (let root = 0; root < 12; root++) {
-    const majorScore = triadScore(chroma, root, false, bassPc, bassConf);
-    const minorScore = triadScore(chroma, root, true, bassPc, bassConf);
+    const majorScore = triadScore(chroma, root, false, bassPc, bassConf, scale);
+    const minorScore = triadScore(chroma, root, true, bassPc, bassConf, scale);
     const minor = minorScore > majorScore + MAJOR_BIAS;
     const score = minor ? minorScore : majorScore;
     if (!best || score > best.score) {
@@ -166,6 +178,7 @@ function triadScore(
   minor: boolean,
   bassPc: number,
   bassConf: number,
+  scale: Uint8Array | null,
 ): number {
   const third = minor ? 3 : 4;
   const tones = [0, third, 7];
@@ -186,7 +199,49 @@ function triadScore(
     else if (bass === (root + 7) % 12) score += BASS_FIFTH * bassConf;
     else if (bass === (root + third) % 12) score += BASS_THIRD * bassConf;
   }
+  if (scale) {
+    let outside = 0;
+    for (const interval of tones) if (!scale[(root + interval) % 12]) outside += 1;
+    // A foreign triad (two tones off the song's scale) is not a quiet chord of the key.
+    if (outside >= 2) score -= 0.16 * outside;
+  }
   return score;
+}
+
+const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+function songScale(observed: BeatView[]): Uint8Array | null {
+  const chroma = new Float32Array(12);
+  for (const view of observed) {
+    for (let i = 0; i < 12; i++) chroma[i] += view.chroma[i] ?? 0;
+  }
+  let best = -Infinity;
+  let root = 0;
+  let minor = false;
+  for (let rotation = 0; rotation < 12; rotation++) {
+    let majorScore = 0;
+    let minorScore = 0;
+    for (let i = 0; i < 12; i++) {
+      const energy = chroma[(rotation + i) % 12] ?? 0;
+      majorScore += energy * (MAJOR_PROFILE[i] ?? 0);
+      minorScore += energy * (MINOR_PROFILE[i] ?? 0);
+    }
+    if (majorScore > best) {
+      best = majorScore;
+      root = rotation;
+      minor = false;
+    }
+    if (minorScore > best) {
+      best = minorScore;
+      root = rotation;
+      minor = true;
+    }
+  }
+  const scale = new Uint8Array(12);
+  const steps = minor ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11];
+  for (const step of steps) scale[(root + step) % 12] = 1;
+  return scale;
 }
 
 /**
@@ -275,6 +330,7 @@ function beatChroma(
   sampleRate: number,
   startTime: number,
   endTime: number,
+  tuning: number,
 ): Float32Array {
   const chroma = new Float32Array(12);
   const start = Math.max(0, Math.floor(startTime * sampleRate));
@@ -289,10 +345,37 @@ function beatChroma(
     if (!fillSpectrum(mono, offset, real, imag, hann)) continue;
     frames.push(framePeaks(real, imag, sampleRate));
   }
-  const tuning = tuningFrom(frames);
   for (const peaks of frames) addPeaks(chroma, peaks, tuning);
   normalize(chroma);
   return chroma;
+}
+
+/** One tuning for the whole song, from the low notes. High partials are sharp and flip the estimate. */
+function estimateSongTuning(mono: Float32Array, sampleRate: number): number {
+  const real = new Float32Array(CHROMA_FFT);
+  const imag = new Float32Array(CHROMA_FFT);
+  const hann = chromaWindow();
+  let x = 0;
+  let y = 0;
+  let weight = 0;
+  const hop = Math.max(CHROMA_HOP, Math.floor(sampleRate * 0.25));
+  for (let offset = 0; offset + 64 < mono.length; offset += hop) {
+    if (!fillSpectrum(mono, offset, real, imag, hann)) break;
+    for (const peak of framePeaks(real, imag, sampleRate)) {
+      if (peak.freq < 75 || peak.freq > 500) continue;
+      const midi = 69 + 12 * Math.log2(peak.freq / 440);
+      const deviation = midi - Math.round(midi);
+      const angle = deviation * 2 * Math.PI;
+      const w = Math.log1p(peak.mag);
+      x += Math.cos(angle) * w;
+      y += Math.sin(angle) * w;
+      weight += w;
+    }
+  }
+  if (weight < 1) return 0;
+  const concentration = Math.hypot(x, y) / weight;
+  if (concentration < 0.2) return 0;
+  return Math.atan2(y, x) / (2 * Math.PI);
 }
 
 /** Windows stay inside the beat so a chord change is not mixed with the next bar. */
@@ -307,23 +390,6 @@ function frameOffsets(start: number, end: number): number[] {
   for (let offset = start; offset <= last && offsets.length < 8; offset += CHROMA_HOP) offsets.push(offset);
   if (offsets.length === 0) offsets.push(start);
   return offsets;
-}
-
-function tuningFrom(frames: { freq: number; mag: number }[][]): number {
-  const bins = 24;
-  const hist = new Float32Array(bins);
-  for (const peaks of frames) {
-    for (const peak of peaks) {
-      const midi = 69 + 12 * Math.log2(peak.freq / 440);
-      const deviation = midi - Math.round(midi);
-      const slot = Math.round((deviation + 0.5) * bins) % bins;
-      hist[slot] += Math.log1p(peak.mag);
-    }
-  }
-  let best = 0;
-  for (let i = 1; i < bins; i++) if ((hist[i] ?? 0) > (hist[best] ?? 0)) best = i;
-  if ((hist[best] ?? 0) <= 0) return 0;
-  return (best + 0.5) / bins - 0.5;
 }
 
 let chromaHann: Float32Array | null = null;
@@ -357,9 +423,9 @@ function addPeaks(chroma: Float32Array, peaks: { freq: number; mag: number }[], 
     if (claimed[i]) continue;
     const fundamental = peaks[i]?.freq ?? 0;
     const fundamentalMag = peaks[i]?.mag ?? 0;
-    if (fundamental <= 0) continue;
-    // A played note's upper partials are often louder than its fundamental. Fold them
-    // back onto that fundamental so a 7th partial is not a new chord tone.
+    // Above 700 Hz a peak is a partial of a lower string, not a new chord tone.
+    if (fundamental <= 0 || fundamental > 700) continue;
+    // Fold the upper partials back onto that fundamental so a harmonic is not a new triad.
     let weight = partialWeight(fundamental, fundamentalMag);
     for (let j = i + 1; j < peaks.length; j++) {
       if (claimed[j]) continue;
