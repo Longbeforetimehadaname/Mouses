@@ -48,7 +48,10 @@ export async function transcribeVocals(
   // @ts-ignore The shell adds this package; see src/pipeline/deps-requested.txt.
   const imported = await import("@huggingface/transformers");
   const transformers = imported as {
-    env: { allowLocalModels: boolean };
+    env: {
+      allowLocalModels: boolean;
+      backends?: { onnx?: { wasm?: { numThreads?: number } } };
+    };
     pipeline: (
       task: "automatic-speech-recognition",
       model: string,
@@ -60,12 +63,14 @@ export async function transcribeVocals(
     ) => Promise<Transcriber>;
   };
   transformers.env.allowLocalModels = false;
+  const wasm = transformers.env.backends?.onnx?.wasm;
+  if (wasm) wasm.numThreads = 1;
   onProgress?.(0.05);
   let transcriber: Transcriber | null = await transformers.pipeline(
     "automatic-speech-recognition",
-    "Xenova/whisper-base",
+    "Xenova/whisper-small",
     {
-      // q8 stays inside the phone budget. Base hears sung words that tiny invents.
+      // q8 on one WASM thread. Small follows the sung word; base swaps in a near one.
       device: "wasm",
       dtype: "q8",
       progress_callback: (info) => {
@@ -104,7 +109,7 @@ async function transcribeChunks(
     return_timestamps: "word",
     chunk_length_s: 30,
     stride_length_s: 2,
-    num_beams: 1,
+    num_beams: 5,
     task: "transcribe",
     condition_on_prev_tokens: false,
     compression_ratio_threshold: 2.4,
@@ -113,15 +118,76 @@ async function transcribeChunks(
   });
   onProgress(0.9);
   const first = Array.isArray(output) ? output[0] : output;
-  const words = chunksToLyricWords(first?.chunks ?? []);
-  const kept: LyricWord[] = [];
+  const words = sungWords(chunksToLyricWords(first?.chunks ?? []), mono);
+  onProgress(1);
+  return words;
+}
+
+const LEADING_MARKS = /^[\s"'“”‘’.,!?;:()[\]{}…♪♫\-—–]+/u;
+const TRAILING_MARKS = /[\s"'“”‘’.,!?;:()[\]{}…♪♫\-—–]+$/u;
+
+// A sung word is the text the voice is holding, with no stage direction around it.
+function cleanSungWord(text: string): string {
+  const stripped = text.replace(LEADING_MARKS, "").replace(TRAILING_MARKS, "").replace(/\s+/g, " ").trim();
+  if (!stripped) return "";
+  if (/^\[.*\]$/.test(stripped) || /^\(.*\)$/.test(stripped)) return "";
+  if (/^(music|applause|laughter|silence|blank|subtitle|subtitles)$/i.test(stripped)) return "";
+  return stripped;
+}
+
+function sungWords(words: readonly LyricWord[], mono: Float32Array): LyricWord[] {
+  const spoken: LyricWord[] = [];
   for (const word of words) {
-    // Drop a word that does not sit on the vocal. That is a guess, not singing.
+    const text = cleanSungWord(word.text);
+    if (!text) continue;
+    if (!(word.end > word.start)) continue;
+    // Nothing in the voice at that moment. Whisper filled the gap.
     if (regionRms(mono, word.start, word.end) < 0.015) continue;
+    const start = vocalOnset(mono, word.start, word.end);
+    spoken.push({ text, start, end: Math.max(word.end, start) });
+  }
+  spoken.sort((a, b) => a.start - b.start || a.end - b.end);
+  const kept: LyricWord[] = [];
+  for (const word of spoken) {
+    const previous = kept[kept.length - 1];
+    // The same word twice on top of itself is one sung word, not two.
+    if (
+      previous &&
+      word.start < previous.end &&
+      previous.text.toLowerCase() === word.text.toLowerCase()
+    ) {
+      previous.end = Math.max(previous.end, word.end);
+      continue;
+    }
     kept.push(word);
   }
-  onProgress(1);
   return kept;
+}
+
+function vocalOnset(mono: Float32Array, startSec: number, endSec: number): number {
+  const frame = Math.round(WHISPER_RATE * 0.01);
+  const start = Math.max(0, Math.floor(startSec * WHISPER_RATE));
+  const end = Math.min(mono.length, Math.max(start + 1, Math.ceil(endSec * WHISPER_RATE)));
+  let peak = 0;
+  const levels: number[] = [];
+  for (let i = start; i < end; i += frame) {
+    let energy = 0;
+    let count = 0;
+    const stop = Math.min(end, i + frame);
+    for (let j = i; j < stop; j++) {
+      const sample = mono[j] ?? 0;
+      energy += sample * sample;
+      count += 1;
+    }
+    const level = Math.sqrt(energy / Math.max(1, count));
+    levels.push(level);
+    if (level > peak) peak = level;
+  }
+  const gate = peak * 0.35;
+  for (let i = 0; i < levels.length; i++) {
+    if ((levels[i] ?? 0) >= gate) return startSec + i * 0.01;
+  }
+  return startSec;
 }
 
 function regionRms(mono: Float32Array, startSec: number, endSec: number): number {
