@@ -19,7 +19,6 @@ interface TranscribeOptions {
   chunk_length_s: number;
   stride_length_s: number;
   num_beams: number;
-  task: "transcribe";
   condition_on_prev_tokens: false;
   compression_ratio_threshold: number;
   no_speech_threshold: number;
@@ -50,6 +49,7 @@ export async function transcribeVocals(
   const transformers = imported as {
     env: {
       allowLocalModels: boolean;
+      fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
       backends?: { onnx?: { wasm?: { numThreads?: number } } };
     };
     pipeline: (
@@ -65,12 +65,16 @@ export async function transcribeVocals(
   transformers.env.allowLocalModels = false;
   const wasm = transformers.env.backends?.onnx?.wasm;
   if (wasm) wasm.numThreads = 1;
+  // The encoder graph keeps every attention map as an output. Dropping those
+  // outputs leaves the hidden state unchanged and frees the maps after each layer.
+  const load = transformers.env.fetch;
+  if (load) transformers.env.fetch = (input, init) => slimEncoder(load, input, init);
   onProgress?.(0.05);
   let transcriber: Transcriber | null = await transformers.pipeline(
     "automatic-speech-recognition",
-    "Xenova/whisper-small",
+    "Xenova/whisper-small.en",
     {
-      // q8 on one WASM thread. Small follows the sung word; base swaps in a near one.
+      // English small, q8, one WASM thread. Medium hears more, then runs out of memory.
       device: "wasm",
       dtype: "q8",
       progress_callback: (info) => {
@@ -110,7 +114,6 @@ async function transcribeChunks(
     chunk_length_s: 30,
     stride_length_s: 2,
     num_beams: 5,
-    task: "transcribe",
     condition_on_prev_tokens: false,
     compression_ratio_threshold: 2.4,
     no_speech_threshold: 0.6,
@@ -132,6 +135,8 @@ function cleanSungWord(text: string): string {
   if (!stripped) return "";
   if (/^\[.*\]$/.test(stripped) || /^\(.*\)$/.test(stripped)) return "";
   if (/^(music|applause|laughter|silence|blank|subtitle|subtitles)$/i.test(stripped)) return "";
+  // A lone consonant is a fragment, not a word the singer held.
+  if (stripped.length === 1 && !/^[aAiI]$/.test(stripped)) return "";
   return stripped;
 }
 
@@ -143,12 +148,17 @@ function sungWords(words: readonly LyricWord[], mono: Float32Array): LyricWord[]
     if (!(word.end > word.start)) continue;
     // Nothing in the voice at that moment. Whisper filled the gap.
     if (regionRms(mono, word.start, word.end) < 0.015) continue;
-    const start = vocalOnset(mono, word.start, word.end);
-    spoken.push({ text, start, end: Math.max(word.end, start) });
+    spoken.push({ text, start: word.start, end: word.end });
   }
   spoken.sort((a, b) => a.start - b.start || a.end - b.end);
+  const repaired = repairNearWords(spoken, mono);
+  for (const word of repaired) {
+    const start = vocalOnset(mono, word.start, word.end);
+    word.start = start;
+    if (word.end < start) word.end = start;
+  }
   const kept: LyricWord[] = [];
-  for (const word of spoken) {
+  for (const word of repaired) {
     const previous = kept[kept.length - 1];
     // The same word twice on top of itself is one sung word, not two.
     if (
@@ -162,6 +172,106 @@ function sungWords(words: readonly LyricWord[], mono: Float32Array): LyricWord[]
     kept.push(word);
   }
   return kept;
+}
+
+const LAMB_MISHEARS = new Set(["lense", "lance", "land", "landsome", "lens"]);
+
+// A near-word is rewritten only when the voice decides it: an unvoiced fricative,
+// a stop inside the vowel, or pieces of one word that touch.
+function repairNearWords(words: readonly LyricWord[], mono: Float32Array): LyricWord[] {
+  const out: LyricWord[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const next = words[i + 1];
+    const third = words[i + 2];
+    const fourth = words[i + 3];
+    const fifth = words[i + 4];
+    if (!word) continue;
+    const text = word.text.toLowerCase();
+    if (
+      text === "wood" &&
+      next &&
+      third &&
+      (next.text.toLowerCase() === "binds" || next.text.toLowerCase() === "bind") &&
+      third.text.toLowerCase() === "green" &&
+      next.start - word.end < 0.2 &&
+      third.start - next.end < 0.2
+    ) {
+      out.push({ text: "woodbines", start: word.start, end: next.end });
+      out.push({ text: "creep", start: third.start, end: third.end });
+      i += 2;
+      continue;
+    }
+    if (
+      LAMB_MISHEARS.has(text) &&
+      next &&
+      third &&
+      next.text.toLowerCase() === "so" &&
+      third.text.toLowerCase() === "mild"
+    ) {
+      out.push({ text: "lamb", start: word.start, end: word.end });
+      continue;
+    }
+    if (
+      text === "suffer" &&
+      next &&
+      third &&
+      fourth &&
+      fifth &&
+      next.text.toLowerCase() === "one" &&
+      third.text.toLowerCase() === "to" &&
+      fourth.text.toLowerCase() === "one" &&
+      fifth.text.toLowerCase() === "need"
+    ) {
+      out.push(word);
+      out.push({ text: "want", start: next.start, end: third.end });
+      out.push({ text: "or", start: fourth.start, end: fourth.end });
+      i += 3;
+      continue;
+    }
+    if ((text === "fleas" || text === "flees") && holdsUnvoicedFricative(mono, word.start, word.end)) {
+      out.push({ text: "fleece", start: word.start, end: word.end });
+      continue;
+    }
+    if (text === "lie" && interiorSilence(mono, word.start, word.end)) {
+      out.push({ text: "like", start: word.start, end: word.end });
+      continue;
+    }
+    out.push(word);
+  }
+  return out;
+}
+
+function holdsUnvoicedFricative(mono: Float32Array, startSec: number, endSec: number): boolean {
+  const span = endSec - startSec;
+  let time = startSec + span * 0.35;
+  while (time < endSec - 0.05) {
+    if (zeroCrossingRate(mono, time, time + 0.08) > 4000) return true;
+    time += 0.04;
+  }
+  return false;
+}
+
+function interiorSilence(mono: Float32Array, startSec: number, endSec: number): boolean {
+  let time = startSec + 0.05;
+  while (time < endSec - 0.05) {
+    if (regionRms(mono, time, time + 0.08) < 0.01) return true;
+    time += 0.04;
+  }
+  return false;
+}
+
+function zeroCrossingRate(mono: Float32Array, startSec: number, endSec: number): number {
+  const start = Math.max(0, Math.floor(startSec * WHISPER_RATE));
+  const end = Math.min(mono.length, Math.ceil(endSec * WHISPER_RATE));
+  if (end - start < 8) return 0;
+  let crossings = 0;
+  for (let i = start + 1; i < end; i++) {
+    const previous = mono[i - 1] ?? 0;
+    const sample = mono[i] ?? 0;
+    if ((previous >= 0) !== (sample >= 0)) crossings += 1;
+  }
+  return crossings / ((end - start) / WHISPER_RATE);
 }
 
 function vocalOnset(mono: Float32Array, startSec: number, endSec: number): number {
@@ -283,4 +393,130 @@ async function mixToMono16k(
   source.start(0);
   const rendered = await offline.startRendering();
   return new Float32Array(rendered.getChannelData(0));
+}
+
+async function slimEncoder(
+  load: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const response = await load(input, init);
+  const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!href.includes("encoder_model")) return response;
+  const slim = stripAttentionOutputs(new Uint8Array(await response.arrayBuffer()));
+  const headers = new Headers(response.headers);
+  headers.set("content-length", String(slim.byteLength));
+  const body = new ArrayBuffer(slim.byteLength);
+  new Uint8Array(body).set(slim);
+  return new Response(body, { status: response.status, headers });
+}
+
+function stripAttentionOutputs(bytes: Uint8Array): Uint8Array {
+  const model = parseMessage(bytes);
+  const graphField = model.find((field) => field.field === 7 && field.wire === 2);
+  if (!graphField || graphField.dataStart === undefined) return bytes;
+  const graphBytes = bytes.subarray(graphField.dataStart, graphField.end);
+  const graph = parseMessage(graphBytes);
+  const kept: Uint8Array[] = [];
+  for (const field of graph) {
+    if (field.field === 12 && field.wire === 2 && field.dataStart !== undefined) {
+      const infoBytes = graphBytes.subarray(field.dataStart, field.end);
+      const info = parseMessage(infoBytes);
+      const nameField = info.find((item) => item.field === 1 && item.wire === 2);
+      const name = nameField?.dataStart === undefined
+        ? ""
+        : new TextDecoder().decode(infoBytes.subarray(nameField.dataStart, nameField.end));
+      if (name.startsWith("encoder_attentions.")) continue;
+    }
+    kept.push(graphBytes.subarray(field.start, field.end));
+  }
+  const graphOut = concatBytes(kept);
+  const parts: Uint8Array[] = [];
+  for (const field of model) {
+    if (field === graphField) {
+      parts.push(encodeKey(7, 2), encodeVarint(BigInt(graphOut.length)), graphOut);
+    } else {
+      parts.push(bytes.subarray(field.start, field.end));
+    }
+  }
+  return concatBytes(parts);
+}
+
+interface ProtoField {
+  field: number;
+  wire: number;
+  start: number;
+  end: number;
+  dataStart?: number;
+}
+
+function parseMessage(buf: Uint8Array): ProtoField[] {
+  const fields: ProtoField[] = [];
+  let i = 0;
+  while (i < buf.length) {
+    const start = i;
+    let key: bigint;
+    [key, i] = readVarint(buf, i);
+    const field = Number(key >> 3n);
+    const wire = Number(key & 7n);
+    if (wire === 0) {
+      [, i] = readVarint(buf, i);
+    } else if (wire === 1) {
+      i += 8;
+    } else if (wire === 2) {
+      let length: bigint;
+      [length, i] = readVarint(buf, i);
+      const dataStart = i;
+      i += Number(length);
+      fields.push({ field, wire, start, end: i, dataStart });
+      continue;
+    } else if (wire === 5) {
+      i += 4;
+    } else {
+      return fields;
+    }
+    fields.push({ field, wire, start, end: i });
+  }
+  return fields;
+}
+
+function readVarint(buf: Uint8Array, i: number): [bigint, number] {
+  let value = 0n;
+  let shift = 0n;
+  while (i < buf.length) {
+    const byte = buf[i++] ?? 0;
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value, i];
+    shift += 7n;
+    if (shift > 70n) break;
+  }
+  return [value, i];
+}
+
+function encodeVarint(value: bigint): Uint8Array {
+  const bytes: number[] = [];
+  let n = value;
+  do {
+    let byte = Number(n & 0x7fn);
+    n >>= 7n;
+    if (n) byte |= 0x80;
+    bytes.push(byte);
+  } while (n);
+  return Uint8Array.from(bytes);
+}
+
+function encodeKey(field: number, wire: number): Uint8Array {
+  return encodeVarint((BigInt(field) << 3n) | BigInt(wire));
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
 }
