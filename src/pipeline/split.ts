@@ -30,8 +30,17 @@ export const splitMp3: SplitMp3 = async (file, onProgress) => {
   onProgress({ stage: "Reading lyrics", fraction: 0.9 });
 
   onProgress({ stage: "Finding chords", fraction: 0.92 });
-  const found = detectChords(decoded.left, decoded.right, MODEL_RATE);
-  const chords = chordChanges(found.bpm, found.beats);
+  const harmonic = chordMix(separated);
+  const found = detectChords(
+    decoded.left,
+    decoded.right,
+    MODEL_RATE,
+    separated.bass.left,
+    separated.bass.right,
+    harmonic.left,
+    harmonic.right,
+  );
+  const chords = chordChanges(found.beats);
   const durationSec = decoded.left.length / MODEL_RATE;
   onProgress({ stage: "Ready", fraction: 1 });
 
@@ -61,23 +70,45 @@ function toWordLyrics(words: readonly { text: string; start: number }[]): WordLy
 }
 
 function chordChanges(
-  bpm: number,
   beats: readonly { bar: number; beat: number; chord: string | null; time: number }[],
 ): ChordChange[] {
   const changes: ChordChange[] = [];
   let previousBeat = -1;
   for (const beat of beats) {
     if (!beat.chord) continue;
-    const index = bpm > 0
-      ? Math.max(0, Math.round((beat.time * bpm) / 60))
-      : beat.bar * 4 + beat.beat;
+    const index = beat.bar * 4 + beat.beat;
     if (index === previousBeat) continue;
     const last = changes[changes.length - 1];
     if (last && last.name === beat.chord) continue;
-    changes.push({ beat: index, name: beat.chord });
+    changes.push({
+      beat: index,
+      name: beat.chord,
+      timeSec: Number.isFinite(beat.time) ? beat.time : 0,
+    });
     previousBeat = index;
   }
   return changes;
+}
+
+function chordMix(separated: {
+  guitar: { left: Float32Array; right: Float32Array };
+  rest: { left: Float32Array; right: Float32Array };
+}): { left: Float32Array; right: Float32Array } {
+  // Guitar and the rest of the accompaniment. The bass stem is passed beside
+  // this mix, so a passing bass note is not read as a new chord root.
+  const length = Math.max(separated.guitar.left.length, separated.rest.left.length);
+  const left = new Float32Array(length);
+  const right = new Float32Array(length);
+  addInto(left, separated.guitar.left, 1);
+  addInto(right, separated.guitar.right, 1);
+  addInto(left, separated.rest.left, 0.7);
+  addInto(right, separated.rest.right, 0.7);
+  return { left, right };
+}
+
+function addInto(destination: Float32Array, source: Float32Array, gain: number): void {
+  const length = Math.min(destination.length, source.length);
+  for (let i = 0; i < length; i++) destination[i] = (destination[i] ?? 0) + (source[i] ?? 0) * gain;
 }
 
 async function decodeToStereo44100(file: ArrayBuffer): Promise<{ left: Float32Array; right: Float32Array }> {

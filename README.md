@@ -46,7 +46,7 @@ Sync uploads and downloads song files in a Drive folder named `Mouses`. Each son
 
 ## Pipeline and player
 
-The phone app calls `splitMp3` from `src/pipeline/split.ts` and renders `Player` from `src/player/Player.tsx`. Those are the real modules: Demucs, Whisper, and chord detection in the browser, and the stem mixer with synced lyrics and a 4/4 chord grid.
+The phone app calls `splitMp3` from `src/pipeline/split.ts` and renders `Player` from `src/player/Player.tsx`. Those are the real modules: Spleeter stem separation, Whisper, and chord detection in the browser, and the stem mixer with synced lyrics and a 4/4 chord grid.
 
 `npm run dev` and `npm run build` generate temporary stubs at those paths only when the real files are absent, then the build deletes stubs that still carry the `@mouses-temporary-stub` marker. `.gitignore` lists the two paths so a stub left behind is not committed. Tracked files stay tracked; the script does not overwrite a file that lacks the marker.
 
@@ -70,7 +70,7 @@ The phone app calls `splitMp3` from `src/pipeline/split.ts` and renders `Player`
 
 ## Stack
 
-Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` 1.31.1 runs Demucs. `@huggingface/transformers` 4.3.2 runs Whisper. There is no Python and no app server.
+Vite, React, and TypeScript. `vite-plugin-pwa` makes an installable standalone web app (safe areas, large touch targets, offline shell). `idb` wraps IndexedDB. `onnxruntime-web` 1.31.1 runs four Spleeter U-Nets (vocals, drums, bass, other) on WASM, one thread, with no GPU. The bass stem is the bass network's output, including the fp32 bass graph so loud notes are not dropped. Guitar and rest split what the model calls other. `@huggingface/transformers` 4.3.2 runs quantized Whisper base for word-timed lyrics, and words that do not sit on the vocal are left out. There is no Python and no app server.
 
 ## Earlier phone UI
 

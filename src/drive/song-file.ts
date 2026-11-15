@@ -226,10 +226,12 @@ function readChords(value: unknown): ChordChange[] {
   if (!Array.isArray(value)) throw new Error("Song file chords are invalid.");
   return value.map((entry) => {
     const record = asRecord(entry, "Chord");
-    return {
+    const chord: ChordChange = {
       beat: readFinite(record.beat, "Chord beat"),
       name: readString(record.name, "Chord name"),
     };
+    if (typeof record.timeSec === "number" && Number.isFinite(record.timeSec)) chord.timeSec = record.timeSec;
+    return chord;
   });
 }
 

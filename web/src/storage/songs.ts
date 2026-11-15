@@ -138,7 +138,7 @@ export async function getSong(id: string): Promise<SongMeta | null> {
 
 export async function createSong(file: File): Promise<SongMeta> {
   const song: SongMeta = {
-    id: crypto.randomUUID(),
+    id: songId(),
     title: titleFromFile(file),
     duration: 0,
     status: "processing",
@@ -190,6 +190,22 @@ export async function stemUrl(id: string, stem: StemId): Promise<string> {
 
 export async function originalBlob(id: string): Promise<Blob> {
   return readMp3(id, "original.mp3");
+}
+
+function songId(): string {
+  const api = globalThis.crypto;
+  if (api && typeof api.randomUUID === "function") return api.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (api && typeof api.getRandomValues === "function") api.getRandomValues(bytes);
+  else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex: string[] = [];
+  for (let i = 0; i < bytes.length; i++) hex.push((bytes[i] ?? 0).toString(16).padStart(2, "0"));
+  const id = hex.join("");
+  return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
 }
 
 export async function deleteSong(id: string): Promise<void> {
