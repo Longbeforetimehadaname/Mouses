@@ -9,6 +9,7 @@ import "../../web/src/components/player.css";
 import { STEM_IDS } from "../../web/src/types";
 import type { StemId } from "../../web/src/types";
 import { chordBeats, lyricWords, type ChordChange, type TimedWord } from "./adapt";
+import { isPlainTextFile, timedWordsFromLyricText } from "./lyricText";
 import { audioBufferToWav, silentWav } from "./wav";
 
 export function Player(props: {
@@ -18,13 +19,17 @@ export function Player(props: {
   bpm: number;
   lyrics: TimedWord[];
   chords: ChordChange[];
+  onUploadLyrics: (lyrics: TimedWord[]) => Promise<void>;
   onBack: () => void;
 }): JSX.Element {
-  const { title, stems, durationSec, bpm, lyrics, chords, onBack } = props;
+  const { title, stems, durationSec, bpm, lyrics, chords, onUploadLyrics, onBack } = props;
   const [tab, setTab] = useState<"mixer" | "lyrics" | "chords">("mixer");
   const [time, setTime] = useState(0);
   const [engine, setEngine] = useState<StemEngine | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lyricError, setLyricError] = useState<string | null>(null);
+  const [lyricNote, setLyricNote] = useState<string | null>(null);
+  const [savingLyrics, setSavingLyrics] = useState(false);
   const words = useMemo(() => lyricWords(lyrics), [lyrics]);
   const beats = useMemo(() => chordBeats(chords, durationSec, bpm), [chords, durationSec, bpm]);
 
@@ -52,6 +57,50 @@ export function Player(props: {
     };
   }, [stems, durationSec, bpm]);
 
+  async function applyLyricFile(file: File) {
+    if (savingLyrics) return;
+    if (!isPlainTextFile(file)) {
+      setLyricNote(null);
+      setLyricError("Choose a .txt file.");
+      return;
+    }
+    if (file.size === 0) {
+      setLyricNote(null);
+      setLyricError("That text file is empty.");
+      return;
+    }
+    setSavingLyrics(true);
+    setLyricError(null);
+    setLyricNote(null);
+    try {
+      let text: string;
+      try {
+        text = await file.text();
+      } catch {
+        setLyricError("Could not read that text file.");
+        return;
+      }
+      const next = timedWordsFromLyricText(text, durationSec);
+      if (next.length === 0) {
+        setLyricError("That text file is empty.");
+        return;
+      }
+      try {
+        await onUploadLyrics(next);
+      } catch (caught) {
+        setLyricError(
+          caught instanceof Error && caught.message.trim()
+            ? caught.message
+            : "Could not save those lyrics.",
+        );
+        return;
+      }
+      setLyricNote("Saved on this phone.");
+    } finally {
+      setSavingLyrics(false);
+    }
+  }
+
   return (
     <section className="player-screen" aria-label="Stem player">
       <header className="player-top">
@@ -61,6 +110,37 @@ export function Player(props: {
         <h1 className="player-title">{title}</h1>
       </header>
       <SongTabs tab={tab} onChange={setTab} />
+      {tab === "lyrics" ? (
+        <div className="lyric-upload-bar">
+          <label className={savingLyrics ? "lyric-upload is-disabled" : "lyric-upload"}>
+            <span>{savingLyrics ? "Saving lyrics…" : "Upload lyrics (.txt)"}</span>
+            <input
+              type="file"
+              accept=".txt,text/plain"
+              aria-describedby="lyric-upload-note"
+              disabled={savingLyrics}
+              onChange={(event) => {
+                const input = event.currentTarget;
+                const file = input.files?.[0];
+                input.value = "";
+                if (file) void applyLyricFile(file);
+              }}
+            />
+          </label>
+          <p className="lyric-upload-note" id="lyric-upload-note">
+            Replaces the automatic lyrics for this song. Kept on this phone.
+          </p>
+          {lyricError ? (
+            <p className="lyric-upload-error" role="alert">
+              {lyricError}
+            </p>
+          ) : lyricNote ? (
+            <p className="lyric-upload-note" role="status">
+              {lyricNote}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="player-body">
         {error ? <p className="player-status">{error}</p> : null}
         {tab === "mixer" ? (

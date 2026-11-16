@@ -379,6 +379,71 @@
   color: #b7b7c0;
 }
 
+.lyric-upload-bar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 4px;
+  background: #0e0e10;
+}
+
+.lyric-upload {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid #2e2e36;
+  border-radius: 12px;
+  background: #f4f4f6;
+  color: #121214;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.lyric-upload.is-disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.lyric-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.lyric-upload:focus-within {
+  outline: 2px solid #f4f4f6;
+  outline-offset: 2px;
+}
+
+.lyric-upload-note,
+.lyric-upload-error {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: #b7b7c0;
+}
+
+.lyric-upload-error {
+  color: #ffb4a8;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lyrics-view,
   .chords-view {
