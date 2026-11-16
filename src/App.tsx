@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SplitResult } from "./contract";
 import { SyncPanel } from "./drive/SyncPanel";
-import { deleteSong, listSongs, loadPlayable, saveSplitSong } from "./library/db";
+import { deleteSong, listSongs, loadPlayable, replaceSongLyrics, saveSplitSong } from "./library/db";
 import { errorText, progressPercent, titleFromFilename } from "./library/format";
 import { LibraryHome } from "./library/LibraryHome";
 import type { SongMeta } from "./library/types";
@@ -107,6 +107,18 @@ export function App() {
     }
   }
 
+  async function replaceLyrics(id: string, lyrics: SplitResult["lyrics"]) {
+    const meta = await replaceSongLyrics(id, lyrics);
+    setActive((current) => {
+      if (!current || current.meta.id !== id) return current;
+      return {
+        meta,
+        result: { ...current.result, lyrics: meta.lyrics },
+      };
+    });
+    await refresh();
+  }
+
   async function removeSong(id: string) {
     try {
       await deleteSong(id);
@@ -127,6 +139,7 @@ export function App() {
           bpm={active.result.bpm}
           lyrics={active.result.lyrics}
           chords={active.result.chords}
+          onUploadLyrics={(lyrics) => replaceLyrics(active.meta.id, lyrics)}
           onBack={() => setActive(null)}
         />
       </div>

@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { SplitResult } from "../contract";
+import type { SplitResult, WordLyric } from "../contract";
 import { captureStems, restoreStems } from "./audio";
 import type { SongAudio, SongMeta, Tombstone } from "./types";
 
@@ -83,6 +83,26 @@ export async function listTombstones(): Promise<Tombstone[]> {
 export async function clearTombstone(id: string): Promise<void> {
   const db = await database();
   await db.delete("tombstones", id);
+}
+
+/** Replace one song's lyrics. Audio, id, and stems stay as they are. */
+export async function replaceSongLyrics(id: string, lyrics: WordLyric[]): Promise<SongMeta> {
+  const db = await database();
+  const tx = db.transaction("songs", "readwrite");
+  const store = tx.objectStore("songs");
+  const meta = await store.get(id);
+  if (!meta) {
+    await tx.done;
+    throw new Error("That song is no longer on this phone.");
+  }
+  const next: SongMeta = {
+    ...meta,
+    lyrics: lyrics.map((entry) => ({ timeSec: entry.timeSec, word: entry.word })),
+    updatedAt: Date.now(),
+  };
+  store.put(next);
+  await tx.done;
+  return next;
 }
 
 export async function setDriveFileId(id: string, driveFileId: string): Promise<void> {
