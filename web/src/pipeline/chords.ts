@@ -65,7 +65,7 @@ export function detectChords(
   if (observed.length === 0) return { bpm, beats: [] };
 
   const scale = songScale(observed);
-  for (const view of observed) view.best = bestTriad(view.chroma, view.bassPc, view.bassConf, scale);
+  for (const view of observed) view.best = bestChord(view.chroma, view.bassPc, view.bassConf, scale);
   const smoothed = holdChords(observed, scale);
   const rotation = chooseRotation(smoothed, observed, onsets.low, sampleRate);
   const beats: ChordBeat[] = [];
@@ -87,46 +87,75 @@ export function detectChords(
 }
 
 /**
- * An uncertain beat keeps the chord that is already sounding. A clear new triad
- * is written on the beat it starts; a milder one has to win twice.
+ * An uncertain beat keeps the chord that is already sounding. A new chord is
+ * written on the beat it starts when it beats the chord already sounding.
+ * A milder one has to win twice. There is no absolute score that can veto a
+ * chord which has already won that comparison: a real G was staying labeled F
+ * whenever its template landed under 0.70.
  */
 function holdChords(observed: BeatView[], scale: Uint8Array | null): (Triad | null)[] {
   const labels: (Triad | null)[] = [];
   let held: Triad | null = null;
-  let pending: { root: number; minor: boolean; index: number } | null = null;
+  let pending: { name: string; index: number } | null = null;
+  // A new chord whose flat seventh is the root we just left may only be the previous
+  // chord still ringing (F into G). Keep the triad unless the next beat still hears the seventh.
+  let seventhHold: { name: string; index: number } | null = null;
   for (let index = 0; index < observed.length; index++) {
     const view = observed[index];
     const best = view ? view.best : null;
+    if (seventhHold) {
+      if (best && best.name === seventhHold.name) {
+        labels[seventhHold.index] = best;
+        held = best;
+      }
+      seventhHold = null;
+    }
     if (!held) {
       if (best && best.score >= START_SCORE) held = best;
       labels.push(held);
       continue;
     }
-    const same = !!best && best.root === held.root && best.minor === held.minor;
-    const stuck = view ? triadScore(view.chroma, held.root, held.minor, view.bassPc, view.bassConf, scale) : 0;
+    const carriedSeventh = !!best && !!held && best.name.endsWith("7") && held.root === (best.root + 10) % 12;
+    const candidate: Triad | null = carriedSeventh
+      ? { name: PITCH_NAMES[best.root] ?? best.name, root: best.root, minor: false, score: best.score - 0.045 }
+      : best;
+    const same = !!candidate && candidate.name === held.name;
+    const stuck = view ? chordScore(view.chroma, held.root, tonesFor(held.name), view.bassPc, view.bassConf, scale) : 0;
     // C and Am share two notes. A quiet Am only has to edge out the C it follows.
-    const toRelativeMinor = !!best && best.minor && !held.minor && best.root === (held.root + 9) % 12 && stuck < 0.78;
-    const needed = stuck + (toRelativeMinor ? 0 : CHANGE_MARGIN);
-    const clear = !!best && best.score >= needed && !same;
-    if (!best || same || !clear || best.score < 0.7) {
+    const toRelativeMinor =
+      !!candidate &&
+      isMinorTriad(candidate.name) &&
+      !isMinorTriad(held.name) &&
+      candidate.root === (held.root + 9) % 12 &&
+      stuck < 0.78;
+    const sameRoot = !!candidate && candidate.root === held.root;
+    // Dropping the seventh (G7 back to G) has to be clearer than adding one.
+    const droppingSeventh = !!candidate && held.name.endsWith("7") && candidate.name === PITCH_NAMES[held.root];
+    const margin = toRelativeMinor ? 0 : droppingSeventh ? 0.06 : sameRoot ? 0.03 : CHANGE_MARGIN;
+    const needed = stuck + margin;
+    const clear = !!candidate && !same && candidate.score >= needed && candidate.score >= 0.5;
+    if (!clear) {
       pending = null;
       labels.push(held);
       continue;
     }
-    if (best.score >= STRONG_SCORE) {
-      held = best;
+    // Decisive on this beat, including a one-beat diminished or seventh.
+    if (candidate.score >= STRONG_SCORE || candidate.score >= needed + 0.06) {
+      held = candidate;
       pending = null;
+      if (carriedSeventh && best) seventhHold = { name: best.name, index };
       labels.push(held);
       continue;
     }
-    if (pending && pending.root === best.root && pending.minor === best.minor) {
-      held = best;
+    if (pending && pending.name === candidate.name) {
+      held = candidate;
       labels[pending.index] = held;
       pending = null;
+      if (carriedSeventh && best) seventhHold = { name: best.name, index };
       labels.push(held);
       continue;
     }
-    pending = { root: best.root, minor: best.minor, index };
+    pending = { name: candidate.name, index };
     labels.push(held);
   }
   return labels;
@@ -153,7 +182,7 @@ function observeBeat(
   };
 }
 
-function bestTriad(
+function bestChord(
   chroma: Float32Array,
   bassPc: number,
   bassConf: number,
@@ -161,27 +190,63 @@ function bestTriad(
 ): Triad | null {
   let best: Triad | null = null;
   for (let root = 0; root < 12; root++) {
-    const majorScore = triadScore(chroma, root, false, bassPc, bassConf, scale);
-    const minorScore = triadScore(chroma, root, true, bassPc, bassConf, scale);
+    const majorScore = chordScore(chroma, root, [0, 4, 7], bassPc, bassConf, scale);
+    const minorScore = chordScore(chroma, root, [0, 3, 7], bassPc, bassConf, scale);
     const minor = minorScore > majorScore + MAJOR_BIAS;
-    const score = minor ? minorScore : majorScore;
-    if (!best || score > best.score) {
-      best = { name: minor ? `${PITCH_NAMES[root]}m` : PITCH_NAMES[root], root, minor, score };
+    let name = minor ? `${PITCH_NAMES[root]}m` : PITCH_NAMES[root];
+    let score = minor ? minorScore : majorScore;
+
+    const diminished = chordScore(chroma, root, [0, 3, 6], bassPc, bassConf, scale);
+    const flatFifth = chroma[(root + 6) % 12] ?? 0;
+    const perfectFifth = chroma[(root + 7) % 12] ?? 0;
+    let diminishedName = false;
+    if (flatFifth >= 0.12 && flatFifth > perfectFifth * 1.15 && diminished > score + 0.02) {
+      name = `${PITCH_NAMES[root]}dim`;
+      score = diminished;
+      diminishedName = true;
     }
+
+    // A four-note template scores below the triad when the seventh is quieter than the
+    // root, which is the normal voicing. Treat a real flat seventh as extra evidence
+    // on the major triad instead of a competing template.
+    const flatSeventh = chroma[(root + 10) % 12] ?? 0;
+    const majorSeventh = chroma[(root + 11) % 12] ?? 0;
+    const majorThird = chroma[(root + 4) % 12] ?? 0;
+    if (
+      !minor &&
+      !diminishedName &&
+      flatSeventh >= 0.1 &&
+      flatSeventh > majorSeventh + 0.04 &&
+      flatSeventh >= majorThird * 0.35
+    ) {
+      name = `${PITCH_NAMES[root]}7`;
+      score += 0.045;
+    }
+
+    if (!best || score > best.score) best = { name, root, minor: isMinorTriad(name), score };
   }
   return best;
 }
 
-function triadScore(
+function tonesFor(name: string): number[] {
+  if (name.endsWith("dim")) return [0, 3, 6];
+  if (name.endsWith("7")) return [0, 4, 7, 10];
+  return isMinorTriad(name) ? [0, 3, 7] : [0, 4, 7];
+}
+
+function isMinorTriad(name: string): boolean {
+  return name.endsWith("m") && !name.endsWith("dim");
+}
+
+function chordScore(
   chroma: Float32Array,
   root: number,
-  minor: boolean,
+  tones: readonly number[],
   bassPc: number,
   bassConf: number,
   scale: Uint8Array | null,
 ): number {
-  const third = minor ? 3 : 4;
-  const tones = [0, third, 7];
+  const third = tones.length > 1 ? tones[1] : 4;
   let dot = 0;
   let energy = 0;
   for (let i = 0; i < 12; i++) {
@@ -190,20 +255,22 @@ function triadScore(
   }
   for (const interval of tones) dot += chroma[(root + interval) % 12] ?? 0;
   if (energy <= 1e-12) return 0;
-  // Binary triad template. Equal chord tones, so a single bass harmonic cannot impersonate a major triad
+  // Equal chord tones, so a single bass harmonic cannot impersonate a major triad
   // once its upper partials have been folded back onto the fundamental.
   let score = dot / (Math.sqrt(energy) * Math.sqrt(tones.length));
   if (bassConf >= 0.5 && bassPc >= 0) {
     const bass = ((bassPc % 12) + 12) % 12;
+    const fifth = tones.includes(7) ? 7 : tones.includes(6) ? 6 : 7;
     if (bass === root) score += BASS_ROOT * bassConf;
-    else if (bass === (root + 7) % 12) score += BASS_FIFTH * bassConf;
+    else if (bass === (root + fifth) % 12) score += BASS_FIFTH * bassConf;
     else if (bass === (root + third) % 12) score += BASS_THIRD * bassConf;
   }
   if (scale) {
     let outside = 0;
     for (const interval of tones) if (!scale[(root + interval) % 12]) outside += 1;
-    // A foreign triad (two tones off the song's scale) is not a quiet chord of the key.
-    if (outside >= 2) score -= 0.16 * outside;
+    // A foreign chord (two tones off the song's scale) is not a quiet chord of the key.
+    // One outside tone is a seventh or a borrowed chord, and a key change needs those.
+    if (outside >= 2) score -= 0.08 * outside;
   }
   return score;
 }
@@ -435,8 +502,13 @@ function addPeaks(chroma: Float32Array, peaks: { freq: number; mag: number }[], 
       const harmonic = Math.round(ratio);
       if (harmonic < 2 || harmonic > 14) continue;
       const cents = Math.abs(1200 * Math.log2(ratio / harmonic));
-      if (cents > 28) continue;
       const octave = harmonic === 2 || harmonic === 4 || harmonic === 8;
+      // The 5th and 7th partials sit flat of the tempered third and seventh.
+      const centsLimit = harmonic >= 5 ? 48 : 28;
+      if (cents > centsLimit) continue;
+      // Below 700 Hz a non-octave harmonic is another note of the chord.
+      // The twelfth of a bass G is the D a fifth up; folding it away left G7 looking like a bare third.
+      if (freq <= 700 && !octave) continue;
       const explains = fundamentalMag * harmonic >= mag * 0.28;
       if (!octave && !explains) continue;
       claimed[j] = 1;
@@ -715,8 +787,13 @@ function estimateBpm(flux: Float32Array, sampleRate: number): number {
   for (;;) {
     const half = Math.round(lag / 2);
     if (half < minLag + 1 || half >= lag) break;
+    const doubled = 60 / (half / frameRate);
+    // Kick on 1 and 3 is a strong half-note pulse. The printed grid is the quarter note,
+    // so a shorter lag in the quarter-note range wins when it still carries that pulse.
+    // Eighth notes (above ~168) are not a 4/4 beat.
+    if (doubled < 80 || doubled > 168) break;
     const peak = (scores[half] ?? 0) >= (scores[half - 1] ?? 0) && (scores[half] ?? 0) >= (scores[Math.min(maxLag, half + 1)] ?? 0);
-    if (!peak || (scores[half] ?? 0) < (scores[lag] ?? 0) * 0.85) break;
+    if (!peak || (scores[half] ?? 0) < (scores[lag] ?? 0) * 0.5) break;
     lag = half;
   }
 
